@@ -89,13 +89,13 @@
 
 | 확인 대상 | 통과에 필요한 증거 | 관련 계약 |
 | --- | --- | --- |
-| 복제 실행 주체 | 기존 gateway와 자체 proxy가 동일 요청을 중복 shadow하지 않는 실행량 | 실행 계약 |
-| 응답 수집 경로 | 하나의 request 식별자로 양쪽 결과·실패·미실행 연결 | 이벤트 모델 |
-| 비율과 cohort | serving 비율·shadow 비율의 독립성, 같은 그룹의 키·revision 규칙 | 배정 계약 |
-| 입력·authority | body·query·헤더·서명 의미 보존, mirror용 변경의 공개 계약 영향 | HTTP 전달 |
-| 사용자 영향 | 본문 선행 읽기·복제·캡처·비교 비용, 느린 shadow의 응답 지연 영향 | 품질 기준 |
-| 양방향 전환 | v2 serving 시 v1 shadow 실행·수집·종료까지 동일한 관측 계약 | 단계별 gate |
-| 부작용과 재생 | 실제 실행 효과·인증·데이터 시점·외부 의존 검증 | 적격성 |
+| 복제 실행 주체 | 기존 gateway와 자체 proxy가 동일 요청을 중복 shadow하지 않는 실행량 | [실행 계약](../shadow/parallel-execution.md) |
+| 응답 수집 경로 | 하나의 request 식별자로 양쪽 결과·실패·미실행 연결 | [이벤트 모델](../collection/event-model.md) |
+| 비율과 cohort | serving 비율·shadow 비율의 독립성, 같은 그룹의 키·revision 규칙 | [배정 계약](../routing/serving-and-cohorts.md) |
+| 입력·authority | body·query·헤더·서명 의미 보존, mirror용 변경의 공개 계약 영향 | [HTTP 전달](../routing/http-forwarding.md) |
+| 사용자 영향 | 본문 선행 읽기·복제·캡처·비교 비용, 느린 shadow의 응답 지연 영향 | [품질 기준](../validation/quality-and-acceptance.md) |
+| 양방향 전환 | v2 serving 시 v1 shadow 실행·수집·종료까지 동일한 관측 계약 | [단계별 gate](../rollout/stages-and-gates.md) |
+| 부작용과 재생 | 실제 실행 효과·인증·데이터 시점·외부 의존 검증 | [적격성](../shadow/eligibility-and-sampling.md) |
 
 - 기존 도구의 mirror·통계 기능만 채택하는 안과 비교까지 자체 구현하는 안의 비용 비교 필요
 - 미정 운영 수준·확장 기능: 실제 대상 API의 필요와 추가 부하·복구 계약을 검증한 뒤 별도 결정

@@ -8,7 +8,7 @@
 
 | 원리 | 현재 기획에 적용할 내용 | 적용 경계 |
 | --- | --- | --- |
-| 데이터 준비 → 운영 요청 검증 → 사용자 전환 | 준비 상태를 확인한 뒤 양쪽 실행·비교와 단계적 노출 진행 | 단계별 상태·진입 조건은 적용할 제품에서 정의 |
+| 데이터 준비 → 운영 요청 검증 → 사용자 전환 | 준비 상태를 확인한 뒤 양쪽 실행·비교와 단계적 노출 진행 | S0~S6의 세부 상태·진입 조건은 현재 제품에서 정의 |
 | 데이터 동기화와 읽기 검증 분리 | 초기 적재·변경분 반영은 데이터 계층, 읽기 관측은 프록시의 책임 | 쓰기 복제는 ACK·순서·부분 실패·복구 계약을 정한 뒤 별도 검토 |
 | 비교 전 데이터 문맥 확인 | 원천·최신성·권한·검증 범위를 확인 | 개수 일치·일부 응답 일치만으로 전체 데이터 동일성 판정 금지 |
 | backend 품질과 사용자 품질 분리 | latency·error·CPU·메모리와 실제 serving 사용자 지표를 각각 검증 | shadow 결과만으로 사용자 경험·전체 서비스 성공 보장 불가 |
@@ -53,6 +53,17 @@
 - count 일치만으로 내용·삭제·권한 정합성 판정 금지
 - 적용 순서: 소수 route로 시작하고 데이터 준비·용량·실패 증거에 따라 확대
 - Kafka·EKS·workflow·snapshot 도입: 현재 MVP의 필수 구성에서 제외
+
+## 설계 연결과 결정 대기 항목
+
+| 설계·결정 항목 | 상세 문서 |
+| --- | --- |
+| 응답 제공 비율과 양쪽 실행량의 독립 제어 | [Shadow 적격성·표본](../shadow/eligibility-and-sampling.md), [용량·비용](../infrastructure/capacity-and-cost.md) |
+| 실제 dispatch·종료·timeout·drop을 포함한 부하 검증 | [승격 gate](../rollout/stages-and-gates.md) |
+| 데이터 준비·최신성·복귀 조건의 확인 | [권한·데이터 경계](../_rules/identity-and-data-boundaries.md), [롤백](../rollout/rollback-and-bypass.md) |
+| 쓰기 복제·영속 재생·원자적 dual-write의 MVP 제외 | [적용 범위와 확장 조건](../product/scope-and-workflows.md) |
+| 프록시 제거 전 직접 호출·관측 계약 검증 | [종료](../rollout/retirement.md) |
+| full-shadow 필수 여부·coverage·관측 기간·운영 임계값 결정 | [용량·비용](../infrastructure/capacity-and-cost.md), [승격 gate](../rollout/stages-and-gates.md), [품질 요구사항](../validation/quality-and-acceptance.md) |
 
 ## 실제 적용 전 확인 사항
 

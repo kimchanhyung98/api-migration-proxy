@@ -25,7 +25,7 @@
 - 본 제품의 조합: 사전 serving 배정 + 선택된 반대편 실행 + 양쪽 결과 연계 + 독립적인 상세 저장 표본
 - 도구 검토 기준: 위 제어 중 제공하는 범위와 별도 구현이 필요한 범위 확인
 - 운영자 관점: 프록시의 구성 요소 개수보다 사용자 영향·차이·누락·복귀 가능성 중심의 판단
-- 기능 계약: serving 배정, shadow 실행, 비교 결과
+- 기능 계약: [serving 배정](../routing/serving-and-cohorts.md), [shadow 실행](../shadow/parallel-execution.md), [비교 결과](../comparison/context-and-outcomes.md)
 
 ## 리팩토링 유형별 선행 조건
 
@@ -40,7 +40,7 @@
 - 호환 adapter가 필요한 경우: API·호출자 소유 계층에서 위치·책임·제거 조건 결정
 - 비교용 정규화의 사용자 응답 자동 변환 금지
 - 외부 route 전환 완료를 모든 내부 호출·데이터 의존의 종료로 간주 금지
-- 관련 계약: 적용 범위, 데이터 책임, 종료
+- 관련 계약: [적용 범위](../product/scope-and-workflows.md), [데이터 책임](../_rules/identity-and-data-boundaries.md), [종료](../rollout/retirement.md)
 
 ## 서비스 선택 시 적용 조건
 
@@ -55,5 +55,5 @@
 - 유지: 단일 serving 응답, 제한된 shadow, 비교·관측 분리, 수동 점진 전환과 종료
 - 구현 전 결정: 실제 배치 위치·호환 처리·내부 의존과 도구의 응답 수집 능력
 - 기술 선택: AWS·FastAPI·PostgreSQL의 후보 상태 유지
-- 기존 인프라 재사용·배정 담당·실행 환경: 실행 구조의 조건과 실제 환경을 바탕으로 결정
-- 운영 적합성 판정: 첫 API 계약과 실행 검증 계획의 증거 확보 후 진행
+- 기존 인프라 재사용·배정 담당·실행 환경: [실행 구조](../infrastructure/deployment-and-stack.md)의 조건과 실제 환경을 바탕으로 결정
+- 운영 적합성 판정: 첫 API 계약과 [실행 검증 계획](../validation/test-catalog.md)의 증거 확보 후 진행

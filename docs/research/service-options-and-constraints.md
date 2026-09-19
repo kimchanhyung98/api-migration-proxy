@@ -152,7 +152,7 @@
 - 느린 chunk 응답·pool 포화·연결 timeout의 분류와 총 deadline 적용
 - 반복 취소·캡처 상한 초과 이후 연결·task·메모리 누적 여부
 - 압축·중복 헤더·큰 body의 원본 전달, 부분 수신의 정상 비교 방지
-- 공유 client의 cookie 저장·재전송이 다른 호출자·tenant 요청에 섞이지 않는지 HTTP 전달 계약 검증
+- 공유 client의 cookie 저장·재전송이 다른 호출자·tenant 요청에 섞이지 않는지 [HTTP 전달 계약](../routing/http-forwarding.md) 검증
 
 ## PostgreSQL 이벤트 중복 방지
 
@@ -174,8 +174,10 @@
 
 - 같은 event ID의 동시 삽입·저장 성공 후 ACK 유실·배치 재시도
 - 다른 내용이 같은 ID로 들어오는 오류의 감지
-- 재시도 후 보존 만료 시각 유지, 저장 확인 집계의 중복 증가 방지, 저장 장애 중 serving 지속
+- 재시도 후 보존 만료 시각 유지, W 중복 증가 방지, 저장 장애 중 serving 지속
 
 ## 검증 계획
 
+- 구현 후 검증: [T-10·T-12·T-24·T-36·T-42](../validation/test-catalog.md)
 - 채택 조건: 실제 서비스 구성·대표 부하·통합 동작·배포 종료·운영 비용 검증
+- 관련 설계: [실행 구조](../infrastructure/deployment-and-stack.md), [실행 수명](../shadow/lifecycle-and-limits.md), [비동기 적재](../collection/async-storage.md)
