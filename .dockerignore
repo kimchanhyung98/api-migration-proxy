@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!pyproject.toml
+!requirements-dev.txt
+!src/
+!src/**/*.py
+!tests/
+!tests/**/*.py
+!examples/
+!examples/*.py
+!examples/*.json
+**/__pycache__/
+**/*.py[cod]
