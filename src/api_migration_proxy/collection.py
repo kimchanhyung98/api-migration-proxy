@@ -492,6 +492,7 @@ class SQLiteEventStore:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="comparison-store")
         self._slot = asyncio.Semaphore(1)
         self._connection: sqlite3.Connection | None = None
+        self._closing: asyncio.Future | None = None
         self.counters: Counter[str] = Counter()
 
     def _db(self) -> sqlite3.Connection:
@@ -509,9 +510,16 @@ class SQLiteEventStore:
         return self._connection
 
     async def _run(self, operation: Callable[[], Any]) -> Any:
+        if self._closing is not None:
+            raise RuntimeError("event store is closed")
         await self._slot.acquire()
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self._executor, operation)
+        try:
+            if self._closing is not None:
+                raise RuntimeError("event store is closed")
+            future = asyncio.get_running_loop().run_in_executor(self._executor, operation)
+        except BaseException:
+            self._slot.release()
+            raise
         future.add_done_callback(lambda _: self._slot.release())
         return await asyncio.shield(future)
 
@@ -668,5 +676,9 @@ class SQLiteEventStore:
                 self._connection.close()
                 self._connection = None
 
-        await self._run(close_db)
-        self._executor.shutdown(wait=True)
+        if self._closing is None:
+            # The single executor closes the connection after any in-flight write,
+            # even when its caller has stopped waiting for an acknowledgement.
+            self._closing = asyncio.get_running_loop().run_in_executor(self._executor, close_db)
+            self._executor.shutdown(wait=False)
+        await asyncio.shield(self._closing)

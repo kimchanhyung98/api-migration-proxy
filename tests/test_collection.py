@@ -402,3 +402,51 @@ async def test_t24_ack_lost_after_insert_recovers_same_event_and_counts_once(tmp
         assert collector.metrics()["completeness_known"] is True
     finally:
         await actual.close()
+
+
+async def test_sqlite_close_is_idempotent_and_closed_operations_fail_promptly(tmp_path):
+    store = SQLiteEventStore(str(tmp_path / "events.sqlite"))
+    await store.write_batch([event()])
+    await asyncio.gather(store.close(), store.close())
+    await store.close()
+    for _ in range(2):
+        async with asyncio.timeout(1):
+            with pytest.raises(RuntimeError, match="closed"):
+                await store.write_batch([event()])
+
+
+async def test_cancelled_sqlite_close_still_releases_connection_and_rejects_queued_writes(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    store = SQLiteEventStore(str(tmp_path / "events.sqlite"))
+    entered, release = threading.Event(), threading.Event()
+    original_db = store._db
+
+    def delayed_db():
+        db = original_db()
+        entered.set()
+        if not release.wait(3):
+            raise AssertionError("test did not release SQLite operation")
+        return db
+
+    monkeypatch.setattr(store, "_db", delayed_db)
+    first = asyncio.create_task(store.write_batch([event()]))
+    queued = None
+    try:
+        async with asyncio.timeout(1):
+            while not entered.is_set():
+                await asyncio.sleep(0.005)
+        queued = asyncio.create_task(store.write_batch([event()]))
+        await asyncio.sleep(0)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(store.close(), 0.01)
+    finally:
+        release.set()
+        await first
+        if queued is not None:
+            with pytest.raises(RuntimeError, match="closed"):
+                await queued
+        await store.close()
+    assert store._connection is None
