@@ -2,61 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-import re
 import secrets
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
 import httpx
 
-from .collection import BoundedCollector, DetailPolicy, make_event
-from .comparison import BackendResponse, ComparisonContext, ComparisonPolicy, compare
+from .collection import BoundedCollector, DetailPolicy
+from .comparison import BackendResponse, ComparisonContext, ComparisonPolicy
 from .config import ConfigManager, ConfigurationError
 from .observability import Metrics, MetricSnapshot
+from .processing import ComparisonPipeline
+from .processing import WorkLimits as WorkLimits
 from .routing import backend_url, choose_serving, match_route
 from .transport import BackendTransport, forwarding_headers
 
 
 def _utc() -> str:
     return datetime.now(UTC).isoformat()
-
-
-@dataclass(frozen=True)
-class WorkLimits:
-    compare_max_jobs: int
-    compare_max_bytes: int
-    compare_max_age_seconds: float
-    compare_workers: int
-    compare_timeout_seconds: float
-    event_retention_seconds: float
-    environment: str
-    migration_id: str
-    epoch_id: str
-
-    def __post_init__(self) -> None:
-        for name, value in vars(self).items():
-            if name in {"environment", "migration_id", "epoch_id"}:
-                if not isinstance(value, str) or not re.fullmatch(
-                    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}", value
-                ):
-                    raise ValueError("invalid observation identifier")
-            elif (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise ValueError("work budgets must be explicitly positive and finite")
-        for name in ("compare_max_jobs", "compare_max_bytes", "compare_workers"):
-            if type(getattr(self, name)) is not int:
-                raise ValueError("work counts must be integers")
 
 
 class ClientDisconnected(Exception):
@@ -72,7 +41,7 @@ class _Input:
         self.receive = receive
         self.done = asyncio.Event()
         self.disconnected = False
-        self.prefix: list[bytes] = []
+        self.prefix: deque[bytes] = deque()
 
     async def chunk(self) -> bytes:
         message = await self.receive()
@@ -97,7 +66,7 @@ class _Input:
 
     async def stream(self):
         while self.prefix:
-            yield self.prefix.pop(0)
+            yield self.prefix.popleft()
         while not self.done.is_set():
             yield await self.chunk()
 
@@ -153,17 +122,6 @@ class _Attempt:
         }
 
 
-@dataclass
-class _ComparisonJob:
-    summary: dict
-    v1: BackendResponse
-    v2: BackendResponse
-    policy: ComparisonPolicy
-    context: ComparisonContext
-    submitted: float
-    size: int
-
-
 class ProxyRuntime:
     def __init__(
         self,
@@ -184,18 +142,18 @@ class ProxyRuntime:
         self.context_provider = context_provider
         self.response_classifier = response_classifier
         self.identity_provider = identity_provider
-        self.detail_policy = detail_policy
-        self.detail_provider = detail_provider
-        if detail_policy and detail_policy.ratio and detail_provider is None:
-            raise ConfigurationError("enabled detail collection needs an approved field provider")
+        self._comparison = ComparisonPipeline(
+            work_limits,
+            collector,
+            metrics,
+            detail_policy=detail_policy,
+            detail_provider=detail_provider,
+        )
         self._active: set[asyncio.Task] = set()
         self._pairs: set[asyncio.Task] = set()
-        self._workers: list[asyncio.Task] = []
-        self._queue: asyncio.Queue[_ComparisonJob] = asyncio.Queue(work_limits.compare_max_jobs)
-        self._jobs = self._job_bytes = self._shadow_slots = 0
+        self._shadow_slots = 0
         self._accepting = False
-        self._work_open = False
-        self._pool: ThreadPoolExecutor | None = None
+        self._close_task: asyncio.Task | None = None
         self._transports: dict[str, BackendTransport] = {}
         self._initial_budgets: Any = None
         config.add_validator(self._validate_snapshot)
@@ -244,8 +202,7 @@ class ProxyRuntime:
             "storage_maintenance": dict(getattr(self.collector.store, "counters", {})),
             "active_requests": len(self._active),
             "pending_pairs": len(self._pairs),
-            "comparison_jobs": self._jobs,
-            "comparison_bytes": self._job_bytes,
+            **self._comparison.status(),
             "ready": self.ready,
             "scope": "current_process",
         }
@@ -263,6 +220,8 @@ class ProxyRuntime:
         return MetricSnapshot(counters, gauges, snapshot.histograms)
 
     async def start(self) -> None:
+        if self._close_task is not None:
+            raise RuntimeError("runtime is closed")
         if self._accepting:
             return
         snapshot = self.config.current
@@ -277,197 +236,24 @@ class ProxyRuntime:
             ),
             "shadow": BackendTransport(budgets.shadow_timeout_seconds, budgets.shadow_max_inflight),
         }
-        self._pool = ThreadPoolExecutor(
-            max_workers=self.work_limits.compare_workers, thread_name_prefix="comparison"
-        )
-        self._workers = [
-            asyncio.create_task(self._compare_worker())
-            for _ in range(self.work_limits.compare_workers)
-        ]
+        self._comparison.start()
         self._accepting = True
-        self._work_open = True
 
     def _drop(self, reason: str) -> None:
         self.metrics.increment("collection_dropped_total", reason=reason)
 
-    def _submit(self, summary, v1, v2, policy, context):
-        if not self._work_open:
-            self._drop("shutdown")
-            return
-        size = len(v1.body or b"") + len(v2.body or b"") + 4096
-        size += len(json.dumps(summary).encode())
-        size += sum(
-            len(k.encode()) + len(v.encode()) + 128
-            for response in (v1, v2)
-            for k, v in response.headers
-        )
-        if (
-            self._jobs >= self.work_limits.compare_max_jobs
-            or self._job_bytes + size > self.work_limits.compare_max_bytes
-        ):
-            self._drop("queue_full")
-            return
-        self._jobs += 1
-        self._job_bytes += size
-        self._queue.put_nowait(
-            _ComparisonJob(summary, v1, v2, policy, context, time.monotonic(), size)
-        )
-
-    def _summary_event(self, job, result, selected):
-        summary = dict(job.summary)
-        summary["comparison_completed_at"] = _utc()
-        summary["comparison"] = {
-            "result": result.result,
-            "reason": result.reason,
-            "comparison_class": result.comparison_class,
-            "difference_count": result.difference_count,
-            "differences_truncated": result.difference_count_limited,
-            "paths_truncated": result.difference_paths_truncated,
-            "difference_paths": list(result.difference_paths),
-            "applied_rules": list(result.applied_rules),
-        }
-        return make_event(
-            summary,
-            retention_seconds=self.work_limits.event_retention_seconds,
-            allowed_difference_paths=job.policy.allowed_diff_paths,
-            work_started_at=job.submitted,
-            detail_policy=replace(self.detail_policy, masker=None) if self.detail_policy else None,
-            sample=lambda: 0.0 if selected else 1.0,
-        )
-
-    def _detail_event(self, job, result, base):
-        assert self.detail_provider is not None
-        details = self.detail_provider(job.v1, job.v2, result)
-        event = make_event(
-            base.summary,
-            retention_seconds=self.work_limits.event_retention_seconds,
-            allowed_difference_paths=job.policy.allowed_diff_paths,
-            work_started_at=job.submitted,
-            now=base.created_at,
-            detail_policy=self.detail_policy,
-            details=details,
-            sample=lambda: 0.0,
-        )
-        return event.summary, event.detail, event.detail_expires_at
-
-    async def _compare_worker(self):
-        while True:
-            job = await self._queue.get()
-            route_id = job.summary["route_id"]
-            future: asyncio.Future[Any] | None = None
-            try:
-                age = time.monotonic() - job.submitted
-                self.metrics.observe(
-                    "comparison_duration_seconds", age, route=route_id, phase="queue"
-                )
-                if age > self.work_limits.compare_max_age_seconds:
-                    self._drop("queue_expired")
-                    continue
-                started = time.monotonic()
-                future = asyncio.get_running_loop().run_in_executor(
-                    self._pool, compare, job.v1, job.v2, job.policy, job.context
-                )
-                done, _ = await asyncio.wait(
-                    {future},
-                    timeout=min(
-                        self.work_limits.compare_timeout_seconds,
-                        self.work_limits.compare_max_age_seconds - age,
-                    ),
-                )
-                if not done:
-                    self._drop("timeout")
-                    # The thread still owns its input and slot until computation actually ends.
-                    await asyncio.shield(future)
-                    continue
-                result = future.result()
-                self.metrics.observe(
-                    "comparison_duration_seconds",
-                    time.monotonic() - started,
-                    route=route_id,
-                    phase="compute",
-                )
-                self.metrics.increment(
-                    "comparison_results_total",
-                    route=route_id,
-                    result=result.result,
-                    comparison_class=result.comparison_class,
-                    reason=result.reason,
-                )
-                if result.result in {"matched", "different"}:
-                    self.metrics.increment(
-                        "comparison_pipeline_total", route=route_id, step="comparable"
-                    )
-                selected = bool(
-                    self.detail_policy
-                    and secrets.randbelow(2**53) / 2**53 < self.detail_policy.ratio
-                )
-                event = self._summary_event(job, result, selected)
-                detail_pending = False
-                if selected:
-                    future = asyncio.get_running_loop().run_in_executor(
-                        self._pool, self._detail_event, job, result, event
-                    )
-                    done, _ = await asyncio.wait(
-                        {future},
-                        timeout=max(
-                            0,
-                            min(
-                                self.work_limits.compare_timeout_seconds
-                                - (time.monotonic() - started),
-                                self.work_limits.compare_max_age_seconds
-                                - (time.monotonic() - job.submitted),
-                            ),
-                        ),
-                    )
-                    if done:
-                        try:
-                            event.summary, event.detail, event.detail_expires_at = future.result()
-                        except Exception:
-                            pass  # The already-safe summary retains masking_failed.
-                    else:
-                        detail_pending = True
-                before = self.collector.counters.copy()
-                if not self.collector.submit(event):
-                    rejection_reasons = {
-                        "dropped_expired": "queue_expired",
-                        "dropped_invalid": "masking_failed",
-                        "dropped_shutdown": "shutdown",
-                        "dropped_capacity": "queue_full",
-                    }
-                    reason = next(
-                        (
-                            mapped
-                            for counter, mapped in rejection_reasons.items()
-                            if self.collector.counters[counter] > before[counter]
-                        ),
-                        "queue_full",
-                    )
-                    self._drop(reason)
-                if detail_pending:
-                    # The safe summary is submitted, but this slot still owns the raw detail task.
-                    try:
-                        await asyncio.shield(future)
-                    except Exception:
-                        pass
-            except asyncio.CancelledError:
-                if future is not None and not future.done():
-                    await asyncio.shield(future)
-                self._drop("shutdown")
-                raise
-            except Exception:
-                self._drop("comparison_dropped")
-            finally:
-                self._jobs -= 1
-                self._job_bytes -= job.size
-                self._queue.task_done()
-
     async def flush(self):
         if self._pairs:
             await asyncio.gather(*tuple(self._pairs))
-        await self._queue.join()
+        await self._comparison.flush()
         await self.collector.flush()
 
     async def close(self):
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self):
         self._accepting = False
         if self._initial_budgets is None:
             return
@@ -483,31 +269,16 @@ class ProxyRuntime:
                     task.cancel()
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
-        self._work_open = False
-        try:
-            async with asyncio.timeout(max(0, deadline - time.monotonic())):
-                await self._queue.join()
-        except TimeoutError:
-            self._drop("shutdown")
-        for worker in self._workers:
-            worker.cancel()
-        # Cancellation does not release a running CPU job. Unfinished workers stay tracked.
-        if self._workers:
-            await asyncio.wait(self._workers, timeout=max(0, deadline - time.monotonic()))
-        while not self._queue.empty():
-            job = self._queue.get_nowait()
-            self._jobs -= 1
-            self._job_bytes -= job.size
-            self._queue.task_done()
-            self._drop("shutdown")
+        await self._comparison.close(deadline)
         await self.collector.close(max(0.001, deadline - time.monotonic()))
         for transport in self._transports.values():
             await transport.aclose()
-        if self._pool:
-            self._pool.shutdown(wait=False, cancel_futures=True)
         close_store = getattr(self.collector.store, "close", None)
         if close_store:
-            await close_store()
+            try:
+                await asyncio.wait_for(close_store(), max(0.001, deadline - time.monotonic()))
+            except TimeoutError:
+                self.collector.completeness_known = False
 
     async def _attempt(self, attempt, snapshot, match, scope, body, selected, messages=None):
         route_id = match.route.route_id if match else "unregistered"
@@ -573,7 +344,7 @@ class ProxyRuntime:
                     attempt.contract_class = match.route.contract.classify(
                         attempt.status, body_complete=True
                     )
-                    if self.response_classifier:
+                    if self.response_classifier and attempt.contract_class != "unexpected_error":
                         try:
                             classification = self.response_classifier(
                                 match.route, attempt.response()
@@ -594,13 +365,21 @@ class ProxyRuntime:
         except Exception:
             attempt.outcome = attempt.reason = "transport_error"
         finally:
+            try:
+                if response is not None:
+                    async with asyncio.timeout(max(0, timeout - (time.monotonic() - started))):
+                        await response.aclose()
+            except asyncio.CancelledError:
+                attempt.outcome = attempt.reason = "cancelled"
+                cancelled = True
+            except Exception:
+                if attempt.outcome == "http_response":
+                    attempt.outcome = attempt.reason = "transport_error"
             attempt.duration = time.monotonic() - started
             attempt.ended_at = _utc()
             if not attempt.complete and attempt.capture_state == "complete":
                 attempt.capture_state = "unavailable"
                 attempt.capture.clear()
-            if response is not None:
-                await response.aclose()
             self.metrics.adjust_gauge("backend_inflight", -1, backend=attempt.backend, role=role)
             self.metrics.increment(
                 "backend_completed_total",
@@ -881,7 +660,7 @@ class ProxyRuntime:
                             if self.context_provider
                             else ComparisonContext(logical_request_equal=True)
                         )
-                        self._submit(
+                        self._comparison.submit(
                             summary,
                             attempts["v1"].response(),
                             attempts["v2"].response(),

@@ -120,3 +120,40 @@ async def test_t25_t44_detail_timeout_preserves_summary_and_tracks_actual_cpu_wo
     assert records[0]["event_id"] == first_event_id
     assert records[0]["summary"]["detail_state"] == "masking_failed"
     assert records[0]["detail"] is None
+
+
+async def test_shutdown_after_safe_summary_storage_does_not_report_summary_loss(
+    backend_factory, runtime_factory, asgi_request
+):
+    entered, release = threading.Event(), threading.Event()
+
+    def provider(*_):
+        entered.set()
+        if not release.wait(3):
+            raise AssertionError("test did not release detail provider")
+        return {"value": "private-detail-value"}
+
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={"shutdown_grace_seconds": 0.03},
+        work_values={"compare_timeout_seconds": 0.03},
+        runtime_values={
+            "detail_policy": DetailPolicy(1, 100, 10, ("/value",), lambda *_: "redacted"),
+            "detail_provider": provider,
+        },
+    )
+    try:
+        await asgi_request(harness.runtime).wait()
+        await eventually(entered.is_set)
+        await eventually(lambda: pipeline(harness, "stored") == 1)
+        assert len(await harness.records()) == 1
+        await harness.close()
+        assert harness.runtime.observation_status()["comparison_jobs"] == 1
+        assert harness.metrics.value("collection_dropped_total", reason="shutdown") == 0
+    finally:
+        release.set()
+        await eventually(lambda: harness.runtime.observation_status()["comparison_jobs"] == 0)
+    assert pipeline(harness, "stored") == 1
+    assert harness.metrics.value("collection_dropped_total", reason="shutdown") == 0

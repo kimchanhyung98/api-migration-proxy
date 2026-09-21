@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from api_migration_proxy import runtime as runtime_module
+from api_migration_proxy import processing as processing_module
 
 
 async def eventually(predicate):
@@ -17,7 +17,7 @@ def blocked_comparator(monkeypatch):
     entered = threading.Event()
     release = threading.Event()
     calls = []
-    original = runtime_module.compare
+    original = processing_module.compare
 
     def compare(*args):
         calls.append(1)
@@ -26,7 +26,7 @@ def blocked_comparator(monkeypatch):
             raise AssertionError("test did not release comparator")
         return original(*args)
 
-    monkeypatch.setattr(runtime_module, "compare", compare)
+    monkeypatch.setattr(processing_module, "compare", compare)
     yield entered, release, calls
     release.set()
 
@@ -179,3 +179,60 @@ async def test_t44_shutdown_grace_returns_with_real_thread_resources_still_obser
         release.set()
         await eventually(lambda: harness.runtime.observation_status()["comparison_jobs"] == 0)
     assert harness.runtime.observation_status()["comparison_bytes"] == 0
+
+
+async def test_shutdown_budget_does_not_wait_for_unacknowledged_sqlite_thread(
+    backend_factory, runtime_factory, asgi_request, monkeypatch
+):
+    entered, release = threading.Event(), threading.Event()
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(v1, v2, budget_values={"shutdown_grace_seconds": 0.03})
+    original_db = harness.store._db
+
+    def delayed_db():
+        db = original_db()
+        entered.set()
+        if not release.wait(3):
+            raise AssertionError("test did not release SQLite operation")
+        return db
+
+    monkeypatch.setattr(harness.store, "_db", delayed_db)
+    try:
+        assert (await asgi_request(harness.runtime).wait()).status == 200
+        await eventually(entered.is_set)
+        async with asyncio.timeout(0.5):
+            await harness.close()
+            await harness.runtime.close()
+        assert not release.is_set()
+        assert not harness.runtime.ready
+        assert harness.collector.counters["ack_unknown"] == 1
+        assert harness.collector.metrics()["completeness_known"] is False
+    finally:
+        release.set()
+        await harness.store.close()
+
+
+async def test_shutdown_does_not_count_already_timed_out_job_twice(
+    backend_factory, runtime_factory, asgi_request, blocked_comparator
+):
+    entered, release, _ = blocked_comparator
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={"shutdown_grace_seconds": 0.03},
+        work_values={"compare_timeout_seconds": 0.03},
+    )
+    try:
+        await asgi_request(harness.runtime).wait()
+        await eventually(entered.is_set)
+        await eventually(lambda: dropped(harness, "timeout") == 1)
+        await harness.close()
+        assert harness.runtime.observation_status()["comparison_jobs"] == 1
+        assert dropped(harness, "shutdown") == 0
+    finally:
+        release.set()
+        await eventually(lambda: harness.runtime.observation_status()["comparison_jobs"] == 0)
+    assert dropped(harness, "timeout") == 1
+    assert dropped(harness, "shutdown") == 0
+    assert dropped(harness, "comparison_dropped") == 0

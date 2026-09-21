@@ -712,7 +712,7 @@ async def test_t44_running_comparison_timeout_keeps_slot_until_thread_really_fin
             raise TimeoutError("test did not release comparison")
         return compare(*args)
 
-    monkeypatch.setattr("api_migration_proxy.runtime.compare", blocked_compare)
+    monkeypatch.setattr("api_migration_proxy.processing.compare", blocked_compare)
     v1, v2 = await backend_factory(), await backend_factory()
     harness = await runtime_factory(
         v1,
@@ -1046,3 +1046,57 @@ async def test_t16_overloaded_registered_route_reports_rejection_without_fake_as
         )
         == 1
     )
+
+
+@pytest.mark.parametrize("role", ["serving", "shadow"])
+async def test_response_cleanup_failure_preserves_terminal_accounting(
+    backend_factory, runtime_factory, asgi_request, monkeypatch, role
+):
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"partial":'
+            raise httpx.ReadError("synthetic read failure")
+
+        async def aclose(self):
+            raise RuntimeError("synthetic cleanup failure")
+
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(v1, v2)
+
+    async def open_response(*_):
+        return httpx.Response(200, stream=BrokenStream())
+
+    monkeypatch.setattr(harness.runtime._transports[role], "open", open_response)
+    exchange = asgi_request(harness.runtime)
+    if role == "serving":
+        with pytest.raises(IncompleteResponse, match="upstream response was incomplete"):
+            await exchange.wait()
+    else:
+        await exchange.wait()
+        assert exchange.status == 200
+        assert exchange.body == b'{"ok":true}'
+    await harness.runtime.flush()
+    backend = "v1" if role == "serving" else "v2"
+    assert harness.metrics.value("backend_inflight", backend=backend, role=role) == 0
+    records = await harness.records()
+    assert len(records) == 1
+    assert records[0]["backends"][backend]["execution_outcome"] == "transport_error"
+    assert records[0]["comparison"]["result"] == "execution_error"
+    assert pipeline(harness, "terminal") == 1
+
+
+async def test_business_classifier_cannot_mark_server_error_successful(
+    backend_factory, runtime_factory, asgi_request, respond
+):
+    async def backend(_, writer):
+        await respond(writer, status=500)
+
+    v1, v2 = await backend_factory(backend), await backend_factory(backend)
+    harness = await runtime_factory(
+        v1, v2, runtime_values={"response_classifier": lambda *_: "success"}
+    )
+    assert (await asgi_request(harness.runtime).wait()).status == 500
+    await harness.runtime.flush()
+    record = (await harness.records())[0]
+    assert record["comparison"]["result"] == "execution_error"
+    assert all(b["contract_class"] == "unexpected_error" for b in record["backends"].values())
