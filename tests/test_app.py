@@ -426,6 +426,10 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path):
             assert response.status_code == 200
             assert response.content == b'{"source":"synthetic-v1"}'
             assert response.headers.get_list("set-cookie") == ["first=1", "second=2"]
+            assert response.headers.get_list("server") == [
+                f"{Backend.server_version} {Backend.sys_version}"
+            ]
+            assert len(response.headers.get_list("date")) == 1
             assert client.get("/docs").json() == {"source": "synthetic-v1"}
         assert requests == ["/items/a%2Fb?key=1&key=2", "/docs"]
         process.send_signal(signal.SIGINT)

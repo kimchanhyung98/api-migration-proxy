@@ -168,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         workers=1,
         access_log=False,
         proxy_headers=False,
+        server_header=False,
+        date_header=False,
         lifespan="on",
     )
     return 0
