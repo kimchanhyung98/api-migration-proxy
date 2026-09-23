@@ -24,6 +24,6 @@ flowchart LR
 
 외부 기술 자료는 [공통 기술 평가 기준](../_rules/technology-evaluation.md)에 따라 적용한다.
 
-구현 순서와 단계별 완료 조건은 [구현 작업](../../todo/implementation-plan.md)에서 관리한다.
+구현 순서와 단계별 완료 조건은 [구현 작업](../todo/implementation-plan.md)에서 관리한다.
 
 [전체 도메인](../README.md)

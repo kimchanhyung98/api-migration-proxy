@@ -6,4 +6,4 @@
 | --- | --- |
 | [구현·검증·종료 작업](implementation-plan.md) | M0~M7의 순서·의존·완료 조건과 기획 연결 |
 
-[기획 문서](../docs/README.md)
+[기획 문서](../README.md)

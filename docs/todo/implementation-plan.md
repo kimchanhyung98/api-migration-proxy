@@ -34,14 +34,14 @@
 
 | 단계 | 기준 문서 |
 | --- | --- |
-| M0 | [적용 범위](../docs/product/scope-and-workflows.md), [권한·데이터 책임](../docs/_rules/identity-and-data-boundaries.md), [실행 환경](../docs/infrastructure/deployment-and-stack.md), [품질 목표](../docs/validation/quality-and-acceptance.md) |
-| M1 | [라우팅·HTTP·설정](../docs/routing/README.md), [프록시 우회](../docs/rollout/rollback-and-bypass.md) |
-| M2 | [Shadow 실행·적격성·수명](../docs/shadow/README.md) |
-| M3 | [응답 비교](../docs/comparison/README.md), [수집·보존](../docs/collection/README.md), [계측·분모](../docs/observability/README.md) |
-| M4 | [배정·cohort](../docs/routing/serving-and-cohorts.md), [설정 적용](../docs/routing/configuration.md), [변경·복귀 절차](../docs/rollout/README.md) |
-| M5 | [요구사항·검증 시나리오](../docs/validation/README.md), [부하·장애 증거](../docs/validation/load-and-evidence.md) |
-| M6 | [운영 단계·gate](../docs/rollout/stages-and-gates.md), [사용자·관측 상태](../docs/observability/dashboards-and-alerts.md) |
-| M7 | [종료 계약](../docs/rollout/retirement.md), [보존 기간 관리](../docs/collection/query-and-retention.md) |
+| M0 | [적용 범위](../product/scope-and-workflows.md), [권한·데이터 책임](../_rules/identity-and-data-boundaries.md), [실행 환경](../infrastructure/deployment-and-stack.md), [품질 목표](../validation/quality-and-acceptance.md) |
+| M1 | [라우팅·HTTP·설정](../routing/README.md), [프록시 우회](../rollout/rollback-and-bypass.md) |
+| M2 | [Shadow 실행·적격성·수명](../shadow/README.md) |
+| M3 | [응답 비교](../comparison/README.md), [수집·보존](../collection/README.md), [계측·분모](../observability/README.md) |
+| M4 | [배정·cohort](../routing/serving-and-cohorts.md), [설정 적용](../routing/configuration.md), [변경·복귀 절차](../rollout/README.md) |
+| M5 | [요구사항·검증 시나리오](../validation/README.md), [부하·장애 증거](../validation/load-and-evidence.md) |
+| M6 | [운영 단계·gate](../rollout/stages-and-gates.md), [사용자·관측 상태](../observability/dashboards-and-alerts.md) |
+| M7 | [종료 계약](../rollout/retirement.md), [보존 기간 관리](../collection/query-and-retention.md) |
 
 - 완료 기록: 해당 FR/NFR·검증 시나리오와 실제 결과·미확인 범위 연결
 - 합성 검증만 수행한 작업: 실제 API·부하·운영 완료 상태와 구분
@@ -49,7 +49,7 @@
 ## MVP 완료 정의
 
 - 운영 진입 조건: 해당 단계의 P0·NFR 목표를 실제 API 계약·제한된 부하·장애 시험으로 검증
-- 단계별 완료: [G-01~G-08](../docs/rollout/stages-and-gates.md)의 적용 대상 gate와 실제 관측 기록으로 판정
+- 단계별 완료: [G-01~G-08](../rollout/stages-and-gates.md)의 적용 대상 gate와 실제 관측 기록으로 판정
 - 미사용 기능의 gate: 적용 제외 이유 기록; 미검증 상태를 통과로 표시 금지
 - 최종 완료 조건: 전체 v2 응답, 복귀 기간·v1 잔존 의존·직접 연결·관측 기록 보존 정리
 - 별도 상태 관리: 코드 구현 완료 / 운영 전환 완료 / 프록시 종료 완료
