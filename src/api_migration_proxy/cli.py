@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import sqlite3
 import sys
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -130,6 +132,24 @@ def _metrics(settings: Settings) -> Metrics:
     )
 
 
+def _batch_size(value: str) -> int:
+    try:
+        size = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("batch size must be a positive SQLite integer") from None
+    if not 0 < size <= 2**63 - 1:
+        raise argparse.ArgumentTypeError("batch size must be a positive SQLite integer")
+    return size
+
+
+async def _purge_events(path: str, batch_size: int) -> dict[str, int]:
+    store = SQLiteEventStore(path, create=False)
+    try:
+        return await store.purge_expired(batch_size=batch_size)
+    finally:
+        await store.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="HTTP API migration proxy")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -142,7 +162,25 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port, required=True)
     serve.add_argument("--event-store", required=True, help="local SQLite event file")
+    purge = commands.add_parser(
+        "purge-events", help="remove one batch of expired data from an existing local event store"
+    )
+    purge.add_argument("--event-store", required=True, help="existing local SQLite event file")
+    purge.add_argument(
+        "--batch-size",
+        type=_batch_size,
+        required=True,
+        help="maximum detail rows and summary rows to remove, each; not a time limit",
+    )
     args = parser.parse_args(argv)
+    if args.command == "purge-events":
+        try:
+            result = asyncio.run(_purge_events(args.event_store, args.batch_size))
+        except (OSError, ValueError, sqlite3.Error):
+            print("Event cleanup failed; verify the store and retry.", file=sys.stderr)
+            return 2
+        print(json.dumps(result, sort_keys=True))
+        return 0
     try:
         settings = load_settings(args.config)
     except ConfigurationError:

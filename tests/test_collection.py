@@ -1,11 +1,16 @@
 import asyncio
 import copy
 import json
+import sqlite3
+import subprocess
+import sys
 import time
+from contextlib import closing
 from dataclasses import replace
 
 import pytest
 
+from api_migration_proxy.cli import main
 from api_migration_proxy.collection import (
     BatchResult,
     BoundedCollector,
@@ -355,6 +360,122 @@ async def test_t27_detail_permission_expiry_and_idempotent_bounded_cleanup(tmp_p
         assert await store.query(query, detail_access, now=201) == []
     finally:
         await store.close()
+
+
+def test_cleanup_cli_reopens_store_limits_each_batch_and_preserves_unexpired_data(tmp_path):
+    path = tmp_path / "events #1?.sqlite"
+    unrelated = tmp_path / "other.sqlite"
+    unrelated.write_bytes(b"do not modify this store")
+    policy = DetailPolicy(1, 100, 90, ("/price",), lambda path, value: value)
+    current = time.time()
+    items = [
+        event(now=100),
+        event(now=100),
+        event(now=current, detail_policy=policy, details={"price": 42}),
+        event(now=current, detail_policy=policy, details={"price": 24}),
+    ]
+    items[2].detail_expires_at = current - 1
+
+    async def seed():
+        store = SQLiteEventStore(str(path))
+        try:
+            await store.write_batch(items)
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+
+    def purge():
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "api_migration_proxy.cli",
+                "purge-events",
+                "--event-store",
+                str(path),
+                "--batch-size",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(completed.stdout)
+
+    assert purge() == {"details_deleted": 1, "summaries_deleted": 1, "expired_pending": 1}
+    assert purge() == {"details_deleted": 0, "summaries_deleted": 1, "expired_pending": 0}
+    assert purge() == {"details_deleted": 0, "summaries_deleted": 0, "expired_pending": 0}
+    with closing(sqlite3.connect(path)) as db:
+        rows = {
+            row[0]: row[1:]
+            for row in db.execute("SELECT event_id, summary, detail FROM comparison_event")
+        }
+    assert set(rows) == {items[2].event_id, items[3].event_id}
+    assert rows[items[2].event_id][1] is None
+    assert json.loads(rows[items[2].event_id][0])["detail_state"] == "expired"
+    assert json.loads(rows[items[3].event_id][1]) == {"/price": 24}
+    assert unrelated.read_bytes() == b"do not modify this store"
+
+
+@pytest.mark.parametrize("kind", ["missing", "unrelated", "invalid"])
+def test_cleanup_cli_never_creates_or_initializes_wrong_store(tmp_path, capsys, kind):
+    path = tmp_path / "private-store.sqlite"
+    if kind == "unrelated":
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("CREATE TABLE unrelated (value TEXT)")
+            db.execute("INSERT INTO unrelated VALUES ('preserved')")
+    elif kind == "invalid":
+        path.write_bytes(b"not a database")
+    before = path.read_bytes() if path.exists() else None
+    assert main(["purge-events", "--event-store", str(path), "--batch-size", "1"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Event cleanup failed; verify the store and retry.\n"
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "nan", str(2**63)])
+def test_cleanup_cli_rejects_invalid_batch_without_opening_store(tmp_path, value):
+    path = tmp_path / "missing.sqlite"
+    with pytest.raises(SystemExit) as error:
+        main(["purge-events", "--event-store", str(path), "--batch-size", value])
+    assert error.value.code == 2
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("now", [True, float("nan"), float("inf"), -float("inf")])
+async def test_cleanup_rejects_invalid_clock_without_creating_store(tmp_path, now):
+    path = tmp_path / "missing.sqlite"
+    store = SQLiteEventStore(str(path))
+    try:
+        with pytest.raises(ValueError, match="invalid_delete_time"):
+            await store.purge_expired(now=now, batch_size=1)
+        assert not path.exists()
+    finally:
+        await store.close()
+
+
+def test_cleanup_cli_locked_store_fails_without_deleting_data_and_can_retry(tmp_path, capsys):
+    path = tmp_path / "events.sqlite"
+
+    async def seed():
+        store = SQLiteEventStore(str(path))
+        try:
+            await store.write_batch([event(now=100)])
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+    args = ["purge-events", "--event-store", str(path), "--batch-size", "1"]
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        assert main(args) == 2
+        assert db.execute("SELECT count(*) FROM comparison_event").fetchone()[0] == 1
+    assert capsys.readouterr().err == "Event cleanup failed; verify the store and retry.\n"
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["summaries_deleted"] == 1
 
 
 async def test_submit_snapshots_caller_data_and_never_buffers_invalid_payload():

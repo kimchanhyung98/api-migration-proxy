@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 _CODE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -487,8 +488,9 @@ class EventQuery:
 class SQLiteEventStore:
     """Local synthetic/integration adapter; does not choose the production storage stack."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, create: bool = True):
         self._path = path
+        self._create = create
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="comparison-store")
         self._slot = asyncio.Semaphore(1)
         self._connection: sqlite3.Connection | None = None
@@ -497,6 +499,11 @@ class SQLiteEventStore:
 
     def _db(self) -> sqlite3.Connection:
         if self._connection is None:
+            if not self._create:
+                self._connection = sqlite3.connect(
+                    Path(self._path).resolve().as_uri() + "?mode=rw", uri=True, timeout=1
+                )
+                return self._connection
             self._connection = sqlite3.connect(self._path, timeout=1)
             self._connection.execute("""CREATE TABLE IF NOT EXISTS comparison_event (
                 event_id TEXT PRIMARY KEY, created_at REAL NOT NULL, summary_expires_at REAL NOT NULL,
@@ -640,6 +647,8 @@ class SQLiteEventStore:
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("invalid_delete_batch")
         current = time.time() if now is None else now
+        if not _finite(current):
+            raise ValueError("invalid_delete_time")
 
         def purge() -> dict[str, int]:
             db = self._db()

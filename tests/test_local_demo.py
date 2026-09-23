@@ -2,9 +2,11 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,6 +90,28 @@ def test_local_cli_smoke_with_real_backends_and_persistent_events(
     )
     check(proxy.url, str(database))
     assert "PASS:" in capsys.readouterr().out
+    proxy.process.send_signal(signal.SIGTERM)
+    assert proxy.process.wait(timeout=10) in (0, -signal.SIGTERM)
+    assert b"Application shutdown complete." in proxy.process.stderr.read()
+    with closing(sqlite3.connect(database)) as db:
+        before = dict(db.execute("SELECT event_id, summary FROM comparison_event"))
+    assert len(before) >= 2
+    restarted = local_process(
+        [
+            "-m",
+            "api_migration_proxy.cli",
+            "serve",
+            "--config",
+            str(config),
+            "--event-store",
+            str(database),
+        ]
+    )
+    check(restarted.url, str(database))
+    with closing(sqlite3.connect(database)) as db:
+        after = dict(db.execute("SELECT event_id, summary FROM comparison_event"))
+    assert before.items() <= after.items()
+    assert len(after) >= len(before) + 2
 
 
 @pytest.mark.parametrize("serving", ["v1", "v2"])
