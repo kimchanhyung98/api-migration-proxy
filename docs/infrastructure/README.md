@@ -1,6 +1,6 @@
 # 인프라
 
-실행 구성·스택 선택 조건과 자원·비용 예산을 정의한다.
+Proxy의 실행 구성·스택 선택 조건과 자원·비용 예산을 정의한다. Python/FastAPI 기반 Proxy는 전용 Docker 이미지로 로컬 동작을 확인하며, Terraform과 클라우드 배포 시나리오는 보류한다.
 
 최소 구성은 프록시 서비스와 내부의 제한된 비교·수집 작업, 관측 저장소를 중심으로 검토한다. 아래는 논리 구성으로, 운영 인프라·저장소 제품이나 별도 worker 도입을 확정하지 않는다.
 
@@ -19,7 +19,7 @@ flowchart LR
 
 | 기능 | 상세 범위 |
 | --- | --- |
-| [구성과 스택 선택](deployment-and-stack.md) | 최소 토폴로지와 AWS·FastAPI·PostgreSQL 후보 조건 |
+| [구성과 스택 선택](deployment-and-stack.md) | Proxy 실행·설정·저장 경계와 운영 스택 검토 조건 |
 | [용량·비용](capacity-and-cost.md) | 실행량 수식, 저장·공유 cache·의존 부하 |
 
 ## 공통 기준과 참고자료

@@ -54,6 +54,6 @@
 
 - 유지: 단일 serving 응답, 제한된 shadow, 비교·관측 분리, 수동 점진 전환과 종료
 - 구현 전 결정: 실제 배치 위치·호환 처리·내부 의존과 도구의 응답 수집 능력
-- 기술 선택: AWS·FastAPI·PostgreSQL의 후보 상태 유지
+- 기술 선택: 로컬 Python/FastAPI 사용과 운영 AWS·DB 선택 구분; 클라우드 배포 작업 보류
 - 기존 인프라 재사용·배정 담당·실행 환경: [실행 구조](../infrastructure/deployment-and-stack.md)의 조건과 실제 환경을 바탕으로 결정
 - 운영 적합성 판정: 첫 API 계약과 [실행 검증 계획](../validation/test-catalog.md)의 증거 확보 후 진행
