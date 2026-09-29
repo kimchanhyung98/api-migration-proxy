@@ -1,0 +1,100 @@
+name: Demo validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .demo/**
+      - src/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - requirements-dev.txt
+      - Makefile
+      - .github/workflows/demo.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - .demo/**
+      - src/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - requirements-dev.txt
+      - Makefile
+      - .github/workflows/demo.yml
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: Sequential request count
+        type: number
+        default: 1000
+      v2_ratio:
+        description: Expected v2 serving share (0 to 1)
+        type: number
+        default: 0.5
+      tolerance:
+        description: Absolute share tolerance (0.08 means 8 percentage points)
+        type: number
+        default: 0.08
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  demo:
+    name: Docker demo and serving distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: demo-check-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check demo code and HTTP integration tests
+        run: make demo-docker-test
+
+      - name: Run isolated serving distribution scenario
+        env:
+          DEMO_DISTRIBUTION_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.requests) || '1000' }}
+          DEMO_DISTRIBUTION_V2_RATIO: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.v2_ratio) || '0.5' }}
+          DEMO_DISTRIBUTION_TOLERANCE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.tolerance) || '0.08' }}
+        run: make demo-distribution PYTHON=python3
+
+      - name: Publish distribution summary
+        if: always()
+        run: |
+          if [ -d .demo/results/distribution ]; then
+            find .demo/results/distribution -name summary.md -exec cat {} + >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Remove isolated demo test resources
+        if: always()
+        run: docker compose --file .demo/compose.yml down --volumes --remove-orphans --timeout 15
+
+      - name: Preserve distribution reports and container logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-distribution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .demo/results/distribution/*/config.json
+            .demo/results/distribution/*/report.json
+            .demo/results/distribution/*/validation.json
+            .demo/results/distribution/*/summary.md
+            .demo/results/distribution/*/execution.log
+            .demo/results/distribution/*/containers.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
