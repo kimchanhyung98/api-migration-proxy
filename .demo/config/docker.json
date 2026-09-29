@@ -1,0 +1,93 @@
+{
+  "snapshot": {
+    "schema_version": 1,
+    "revision": "docker-synthetic-001",
+    "previous_revision": null,
+    "change_reason": "Synthetic loopback validation only",
+    "default_v1": "http://v1:8000",
+    "allowed_backends": [
+      "http://v1:8000",
+      "http://v2:8000"
+    ],
+    "budgets": {
+      "serving_timeout_seconds": 5,
+      "shadow_timeout_seconds": 2,
+      "client_send_timeout_seconds": 5,
+      "shutdown_grace_seconds": 5,
+      "serving_max_inflight": 16,
+      "shadow_max_inflight": 8,
+      "request_capture_limit_bytes": 65536,
+      "response_capture_limit_bytes": 65536
+    },
+    "routes": [
+      {
+        "route_id": "synthetic_item",
+        "method": "GET",
+        "path_template": "/items/{id}",
+        "v1": "http://v1:8000",
+        "v2": "http://v2:8000",
+        "owner": "local-fixture",
+        "rollout_enabled": true,
+        "v2_serve_ratio": 0,
+        "cohort": {
+          "mode": "request",
+          "group": "synthetic-item",
+          "key_source": "request",
+          "salt": "synthetic-fixture-only"
+        },
+        "shadow": {
+          "eligible": true,
+          "sample_ratio": 1,
+          "stopped": false,
+          "review_ref": "synthetic-read-only-fixture"
+        },
+        "contract": {
+          "success_statuses": [
+            200
+          ],
+          "expected_rejection_statuses": [
+            404
+          ]
+        },
+        "comparison_policy_revision": "synthetic-json-v1"
+      }
+    ]
+  },
+  "comparison_policies": [
+    {
+      "revision": "synthetic-json-v1",
+      "max_body_bytes": 65536,
+      "max_decoded_body_bytes": 131072,
+      "max_json_depth": 32,
+      "max_json_nodes": 10000,
+      "max_number_digits": 64,
+      "max_number_exponent": 64,
+      "max_differences": 16,
+      "max_diff_paths": 8,
+      "allowed_diff_paths": [
+        "/id",
+        "/name"
+      ]
+    }
+  ],
+  "work_limits": {
+    "compare_max_jobs": 16,
+    "compare_max_bytes": 2097152,
+    "compare_max_age_seconds": 3,
+    "compare_workers": 1,
+    "compare_timeout_seconds": 1,
+    "event_retention_seconds": 3600,
+    "environment": "local",
+    "migration_id": "synthetic",
+    "epoch_id": "synthetic-001"
+  },
+  "collection_limits": {
+    "max_events": 64,
+    "max_bytes": 2097152,
+    "max_age_seconds": 5,
+    "batch_size": 16,
+    "write_timeout_seconds": 1,
+    "max_attempts": 2,
+    "retry_delay_seconds": 0.01
+  }
+}

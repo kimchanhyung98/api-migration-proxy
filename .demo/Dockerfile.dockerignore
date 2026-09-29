@@ -1,0 +1,16 @@
+**
+!pyproject.toml
+!requirements-dev.txt
+!src/
+!src/**/*.py
+!.demo/
+!.demo/**/*.py
+!.demo/pyproject.toml
+!.demo/config/
+!.demo/config/*.json
+**/__pycache__/
+**/*.py[cod]
+.demo/results/
+.demo/.ruff_cache/
+.demo/.mypy_cache/
+.demo/.pytest_cache/

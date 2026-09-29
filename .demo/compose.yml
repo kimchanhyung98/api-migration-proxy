@@ -1,0 +1,74 @@
+name: api-migration-proxy
+
+x-backend: &backend
+  image: api-migration-proxy-demo-backend
+  build:
+    context: ..
+    dockerfile: .demo/Dockerfile
+    target: backend
+  init: true
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+    interval: 2s
+    timeout: 3s
+    retries: 15
+
+services:
+  v1:
+    <<: *backend
+    command: ["python", "-m", "uvicorn", "v1.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-proxy-headers"]
+    ports:
+      - "127.0.0.1:${V1_PORT:-8101}:8000"
+  v2:
+    <<: *backend
+    command: ["python", "-m", "uvicorn", "v2.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-proxy-headers"]
+    ports:
+      - "127.0.0.1:${V2_PORT:-8102}:8000"
+  proxy:
+    image: api-migration-proxy
+    build:
+      context: ..
+      target: runtime
+    init: true
+    command: ["serve", "--config", "/config/proxy.json", "--host", "0.0.0.0", "--port", "8080", "--event-store", "/data/events.sqlite"]
+    ports:
+      - "127.0.0.1:${PROXY_PORT:-8080}:8080"
+    volumes:
+      - events:/data
+      - ${PROXY_CONFIG:-./config/docker.json}:/config/proxy.json:ro
+    depends_on:
+      v1:
+        condition: service_healthy
+      v2:
+        condition: service_healthy
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  user:
+    profiles: [user]
+    image: api-migration-proxy-demo-user
+    build:
+      context: ..
+      dockerfile: .demo/Dockerfile
+      target: user
+    init: true
+    command: ["--url", "http://proxy:8080", "--path", "${DEMO_PATH:-/items/different}", "--requests", "${DEMO_REQUESTS:-100}", "--timeout", "${DEMO_TIMEOUT:-5}"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+  test:
+    profiles: [test]
+    image: api-migration-proxy-demo-test
+    build:
+      context: ..
+      dockerfile: .demo/Dockerfile
+      target: test
+    init: true
+    volumes:
+      - events:/data:ro
+
+volumes:
+  events:
