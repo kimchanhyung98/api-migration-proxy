@@ -1,0 +1,88 @@
+name: Product CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt -e '.[test]'
+
+      - name: Check dependencies, lint, types, and tests
+        run: |
+          python -m pip check
+          make check PYTHON=python
+
+      - name: Build Python packages
+        run: make build PYTHON=python
+
+      - name: Verify installed package and configuration
+        run: |
+          python -m venv "$RUNNER_TEMP/package"
+          "$RUNNER_TEMP/package/bin/python" -m pip install -c requirements-dev.txt dist/*.whl
+          "$RUNNER_TEMP/package/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/package/bin/api-migration-proxy" --help
+          "$RUNNER_TEMP/package/bin/api-migration-proxy" check-config \
+            --config "$GITHUB_WORKSPACE/tests/fixtures/proxy.json"
+
+  docker:
+    name: Docker runtime and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run container checks and HTTP integration tests
+        run: make docker-test
+
+      - name: Build runtime image
+        run: make docker-build
+
+      - name: Verify runtime entry point and configuration
+        run: |
+          docker run --rm api-migration-proxy --help
+          docker run --rm \
+            --mount "type=bind,source=$PWD/tests/fixtures/proxy.json,target=/config/proxy.json,readonly" \
+            api-migration-proxy check-config --config /config/proxy.json

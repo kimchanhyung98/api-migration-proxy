@@ -6,8 +6,7 @@
 !src/**/*.py
 !tests/
 !tests/**/*.py
-!examples/
-!examples/*.py
-!examples/*.json
+!tests/fixtures/
+!tests/fixtures/*.json
 **/__pycache__/
 **/*.py[cod]
