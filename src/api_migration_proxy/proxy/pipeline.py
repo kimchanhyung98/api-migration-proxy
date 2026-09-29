@@ -12,10 +12,16 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from .collection import BoundedCollector, DetailPolicy, make_event
-from .comparison import BackendResponse, ComparisonContext, ComparisonPolicy, compare
-from .config import ConfigurationError
-from .observability import Metrics
+from api_migration_proxy.collection.collector import BoundedCollector
+from api_migration_proxy.collection.events import DetailPolicy, make_event
+from api_migration_proxy.comparison.engine import (
+    BackendResponse,
+    ComparisonContext,
+    ComparisonPolicy,
+    compare,
+)
+from api_migration_proxy.observability.metrics import Metrics
+from api_migration_proxy.routing.configuration import ConfigurationError
 
 
 def _utc() -> str:

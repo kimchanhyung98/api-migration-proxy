@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from .config import Cohort, Route, Snapshot, template_parts
+from .configuration import Cohort, Route, Snapshot, template_parts
 
 
 @dataclass(frozen=True)
@@ -96,10 +96,12 @@ def backend_url(
         registered_parts = template_parts(match.route.path_template)
         if len(raw_parts) != len(registered_parts):
             raise ValueError("raw path does not match the registered path template")
-        path = mapping
-        for registered, raw in zip(registered_parts, raw_parts):
-            if registered.startswith("{") and registered.endswith("}"):
-                path = path.replace(registered, raw)
+        raw_parameters = {
+            registered: raw
+            for registered, raw in zip(registered_parts, raw_parts)
+            if registered.startswith("{") and registered.endswith("}")
+        }
+        path = "/".join(raw_parameters.get(part, part) for part in template_parts(mapping))
     if b"#" in query_string or any(byte < 32 or byte == 127 for byte in query_string):
         raise ValueError("invalid raw query string")
     query = "?" + query_string.decode("ascii") if query_string else ""

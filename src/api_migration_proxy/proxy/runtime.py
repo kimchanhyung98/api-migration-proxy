@@ -14,13 +14,18 @@ from typing import Any
 
 import httpx
 
-from .collection import BoundedCollector, DetailPolicy
-from .comparison import BackendResponse, ComparisonContext, ComparisonPolicy
-from .config import ConfigManager, ConfigurationError
-from .observability import Metrics, MetricSnapshot
-from .processing import ComparisonPipeline
-from .processing import WorkLimits as WorkLimits
-from .routing import backend_url, choose_serving, match_route
+from api_migration_proxy.collection.collector import BoundedCollector
+from api_migration_proxy.collection.events import DetailPolicy
+from api_migration_proxy.comparison.engine import (
+    BackendResponse,
+    ComparisonContext,
+    ComparisonPolicy,
+)
+from api_migration_proxy.observability.metrics import Metrics, MetricSnapshot
+from api_migration_proxy.routing.configuration import ConfigManager, ConfigurationError
+from api_migration_proxy.routing.selection import backend_url, choose_serving, match_route
+
+from .pipeline import ComparisonPipeline, WorkLimits
 from .transport import BackendTransport, forwarding_headers
 
 
@@ -187,9 +192,11 @@ class ProxyRuntime:
                 raise ConfigurationError(
                     "register new route metrics during process startup"
                 ) from None
-            if route.rollout_enabled and route.shadow.eligible:
-                if route.comparison_policy_revision not in self.policies:
-                    raise ConfigurationError("active comparison policy is missing")
+            if (
+                route.comparison_policy_revision
+                and route.comparison_policy_revision not in self.policies
+            ):
+                raise ConfigurationError("route comparison policy is missing")
 
     @property
     def ready(self) -> bool:
