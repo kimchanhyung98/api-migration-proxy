@@ -6,15 +6,14 @@ from urllib.parse import unquote
 
 import pytest
 
-from api_migration_proxy.collection import (
-    BoundedCollector,
-    CollectionLimits,
-    EventQuery,
-    QueryAccess,
-    SQLiteEventStore,
-)
-from api_migration_proxy.comparison import REASON_CODES, ComparisonContext, ComparisonPolicy
-from api_migration_proxy.config import (
+from api_migration_proxy.collection.collector import BoundedCollector, CollectionLimits
+from api_migration_proxy.collection.query import EventQuery, QueryAccess
+from api_migration_proxy.collection.sqlite import SQLiteEventStore
+from api_migration_proxy.comparison.engine import REASON_CODES, ComparisonContext, ComparisonPolicy
+from api_migration_proxy.observability.metrics import DEFAULT_REASONS, Metrics
+from api_migration_proxy.proxy.pipeline import WorkLimits
+from api_migration_proxy.proxy.runtime import ProxyRuntime
+from api_migration_proxy.routing.configuration import (
     Cohort,
     ConfigManager,
     ResponseContract,
@@ -23,8 +22,6 @@ from api_migration_proxy.config import (
     ShadowPolicy,
     Snapshot,
 )
-from api_migration_proxy.observability import DEFAULT_REASONS, Metrics
-from api_migration_proxy.runtime import ProxyRuntime, WorkLimits
 
 
 @pytest.fixture

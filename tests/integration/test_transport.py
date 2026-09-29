@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from api_migration_proxy.transport import BackendTransport, forwarding_headers
+from api_migration_proxy.proxy.transport import BackendTransport, forwarding_headers
 
 
 @dataclass

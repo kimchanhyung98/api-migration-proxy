@@ -5,7 +5,8 @@ import time
 
 import pytest
 
-from api_migration_proxy.collection import DetailPolicy, EventQuery, QueryAccess
+from api_migration_proxy.collection.events import DetailPolicy
+from api_migration_proxy.collection.query import EventQuery, QueryAccess
 
 
 async def eventually(predicate):
@@ -31,7 +32,7 @@ async def test_t25_sampled_out_detail_never_invokes_provider_or_masker(
         calls.append("masker")
         return "redacted"
 
-    monkeypatch.setattr("api_migration_proxy.runtime.secrets.randbelow", lambda n: n * 3 // 4)
+    monkeypatch.setattr("api_migration_proxy.proxy.runtime.secrets.randbelow", lambda n: n * 3 // 4)
     v1, v2 = await backend_factory(), await backend_factory()
     harness = await runtime_factory(
         v1,

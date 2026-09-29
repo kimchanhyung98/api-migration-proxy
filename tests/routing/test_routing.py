@@ -3,7 +3,7 @@ from dataclasses import FrozenInstanceError, asdict, replace
 
 import pytest
 
-from api_migration_proxy.config import (
+from api_migration_proxy.routing.configuration import (
     Cohort,
     ConfigManager,
     ConfigurationError,
@@ -16,7 +16,12 @@ from api_migration_proxy.config import (
     read_config,
     snapshot_from_dict,
 )
-from api_migration_proxy.routing import backend_url, choose_serving, cohort_bucket, match_route
+from api_migration_proxy.routing.selection import (
+    backend_url,
+    choose_serving,
+    cohort_bucket,
+    match_route,
+)
 
 
 @pytest.fixture
@@ -83,6 +88,35 @@ def test_raw_path_and_query_preserved_and_explicit_mapping(snapshot, route):
     assert (
         backend_url(mapped_snapshot, encoded, "v2", b"/catalog/%2E%2E")
         == "http://localhost:8102/api/v2/items/%2E%2E"
+    )
+
+
+@pytest.mark.parametrize("backend, port", [("v1", 8101), ("v2", 8102)])
+@pytest.mark.parametrize(
+    "decoded_path, raw_path, expected_path",
+    [
+        ("/objects/{b}/hello", b"/objects/{b}/hello", "/mapped/hello/{b}"),
+        ("/objects/{b}/{a}", b"/objects/{b}/{a}", "/mapped/{a}/{b}"),
+        ("/objects/{b}/hello", b"/objects/%7Bb%7D/hello", "/mapped/hello/%7Bb%7D"),
+        ("/objects/one two/+", b"/objects/one%20two/%2b", "/mapped/%2b/one%20two"),
+    ],
+)
+def test_path_mapping_does_not_reinterpret_parameter_values(
+    snapshot, route, backend, port, decoded_path, raw_path, expected_path
+):
+    mapped = replace(
+        route,
+        path_template="/objects/{a}/{b}",
+        v1_path_template="/mapped/{b}/{a}",
+        v2_path_template="/mapped/{b}/{a}",
+    )
+    configured = replace(snapshot, routes=(mapped,))
+    match = match_route(configured, "GET", decoded_path)
+    query = b"item=1&item=2&path=%2F&literal=%7Ba%7D"
+
+    assert (
+        backend_url(configured, match, backend, raw_path, query)
+        == f"http://localhost:{port}{expected_path}?{query.decode('ascii')}"
     )
 
 

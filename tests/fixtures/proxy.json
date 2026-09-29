@@ -1,0 +1,71 @@
+{
+  "snapshot": {
+    "schema_version": 1,
+    "revision": "configuration-fixture-1",
+    "previous_revision": null,
+    "change_reason": "Proxy configuration contract test",
+    "default_v1": "https://v1.example.invalid",
+    "allowed_backends": ["https://v1.example.invalid", "https://v2.example.invalid"],
+    "budgets": {
+      "serving_timeout_seconds": 5,
+      "shadow_timeout_seconds": 2,
+      "client_send_timeout_seconds": 5,
+      "shutdown_grace_seconds": 5,
+      "serving_max_inflight": 16,
+      "shadow_max_inflight": 8,
+      "request_capture_limit_bytes": 65536,
+      "response_capture_limit_bytes": 65536
+    },
+    "routes": [{
+      "route_id": "item_read",
+      "method": "GET",
+      "path_template": "/items/{id}",
+      "v1": "https://v1.example.invalid",
+      "v2": "https://v2.example.invalid",
+      "owner": "contract-tests",
+      "rollout_enabled": false,
+      "v2_serve_ratio": 0,
+      "cohort": {
+        "mode": "request",
+        "group": "item-read",
+        "key_source": "request",
+        "salt": "fixture-salt"
+      },
+      "shadow": {"eligible": false, "sample_ratio": 0, "stopped": false},
+      "contract": {"success_statuses": [200], "expected_rejection_statuses": [404]},
+      "comparison_policy_revision": "json-policy-1"
+    }]
+  },
+  "comparison_policies": [{
+    "revision": "json-policy-1",
+    "max_body_bytes": 65536,
+    "max_decoded_body_bytes": 131072,
+    "max_json_depth": 32,
+    "max_json_nodes": 10000,
+    "max_number_digits": 64,
+    "max_number_exponent": 64,
+    "max_differences": 16,
+    "max_diff_paths": 8,
+    "allowed_diff_paths": ["/id", "/name"]
+  }],
+  "work_limits": {
+    "compare_max_jobs": 16,
+    "compare_max_bytes": 2097152,
+    "compare_max_age_seconds": 3,
+    "compare_workers": 1,
+    "compare_timeout_seconds": 1,
+    "event_retention_seconds": 3600,
+    "environment": "test",
+    "migration_id": "configuration-tests",
+    "epoch_id": "fixture-1"
+  },
+  "collection_limits": {
+    "max_events": 64,
+    "max_bytes": 2097152,
+    "max_age_seconds": 5,
+    "batch_size": 16,
+    "write_timeout_seconds": 1,
+    "max_attempts": 2,
+    "retry_delay_seconds": 0.01
+  }
+}

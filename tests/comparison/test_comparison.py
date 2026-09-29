@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from api_migration_proxy.comparison import (
+from api_migration_proxy.comparison.engine import (
     BackendResponse,
     ComparisonContext,
     ComparisonPolicy,

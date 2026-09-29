@@ -3,14 +3,8 @@ import threading
 
 import pytest
 
-from api_migration_proxy.observability import (
-    CohortWindow,
-    Metrics,
-    PipelineObservation,
-    WorkerMetrics,
-    merge_workers,
-    ratio,
-)
+from api_migration_proxy.observability.coverage import CohortWindow, PipelineObservation, ratio
+from api_migration_proxy.observability.metrics import Metrics, WorkerMetrics, merge_workers
 
 
 def test_request_cohort_keeps_late_work_in_original_epoch_and_deduplicates_ack():

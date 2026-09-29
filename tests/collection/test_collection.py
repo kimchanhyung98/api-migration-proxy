@@ -11,16 +11,10 @@ from dataclasses import replace
 import pytest
 
 from api_migration_proxy.cli import main
-from api_migration_proxy.collection import (
-    BatchResult,
-    BoundedCollector,
-    CollectionLimits,
-    DetailPolicy,
-    EventQuery,
-    QueryAccess,
-    SQLiteEventStore,
-    make_event,
-)
+from api_migration_proxy.collection.collector import BatchResult, BoundedCollector, CollectionLimits
+from api_migration_proxy.collection.events import DetailPolicy, make_event
+from api_migration_proxy.collection.query import EventQuery, QueryAccess
+from api_migration_proxy.collection.sqlite import SQLiteEventStore
 
 
 def event(**kwargs):

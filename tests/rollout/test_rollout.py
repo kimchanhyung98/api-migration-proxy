@@ -1,6 +1,6 @@
 import pytest
 
-from api_migration_proxy.rollout import (
+from api_migration_proxy.rollout.policy import (
     GATES,
     RETIREMENT_CHECKS,
     ROLLBACK_CHECKS,

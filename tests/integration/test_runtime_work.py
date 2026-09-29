@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from api_migration_proxy import processing as processing_module
+from api_migration_proxy.proxy import pipeline as processing_module
 
 
 async def eventually(predicate):

@@ -16,9 +16,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from api_migration_proxy.app import create_app, create_control_app, prometheus_text
-from api_migration_proxy.collection import BatchResult
-from api_migration_proxy.observability import Metrics
+from api_migration_proxy.app import create_app, create_control_app
+from api_migration_proxy.collection.collector import BatchResult
+from api_migration_proxy.observability.metrics import Metrics
+from api_migration_proxy.observability.prometheus import prometheus_text
 
 
 class RuntimeDouble:
@@ -267,7 +268,7 @@ async def test_control_exports_storage_failure_without_counting_scrapes_as_write
 
 
 def example_settings():
-    return json.loads((Path(__file__).parents[1] / "examples/local.json").read_text())
+    return json.loads((Path(__file__).parents[1] / "fixtures/proxy.json").read_text())
 
 
 def test_cli_config_check_validates_without_starting_server(monkeypatch, capsys):
@@ -277,14 +278,25 @@ def test_cli_config_check_validates_without_starting_server(monkeypatch, capsys)
         pytest.fail("configuration checking must not start a server")
 
     monkeypatch.setattr("api_migration_proxy.cli.uvicorn.run", forbidden)
-    path = Path(__file__).parents[1] / "examples/local.json"
+    path = Path(__file__).parents[1] / "fixtures/proxy.json"
     assert main(["check-config", "--config", str(path)]) == 0
     assert capsys.readouterr().out == "Configuration valid.\n"
 
 
 @pytest.mark.parametrize(
     "case",
-    ["duplicate", "nonfinite", "missing", "unknown", "policy", "overflow", "boolean", "rule_field"],
+    [
+        "duplicate",
+        "nonfinite",
+        "missing",
+        "unknown",
+        "policy",
+        "active_without_policy",
+        "stopped_without_policy",
+        "overflow",
+        "boolean",
+        "rule_field",
+    ],
 )
 def test_cli_rejects_invalid_configuration_without_values_in_output(tmp_path, capsys, case):
     from api_migration_proxy.cli import main
@@ -295,6 +307,17 @@ def test_cli_rejects_invalid_configuration_without_values_in_output(tmp_path, ca
     elif case == "unknown":
         data["unexpected"] = "sensitive value"
     elif case == "policy":
+        data["comparison_policies"] = []
+    elif case in {"active_without_policy", "stopped_without_policy"}:
+        route = data["snapshot"]["routes"][0]
+        route["rollout_enabled"] = True
+        route["shadow"].update(
+            eligible=True,
+            sample_ratio=1,
+            stopped=case == "stopped_without_policy",
+            review_ref="synthetic-read-only-fixture",
+        )
+        route["comparison_policy_revision"] = None
         data["comparison_policies"] = []
     elif case == "overflow":
         data["work_limits"]["compare_max_age_seconds"] = 10**1000
@@ -335,7 +358,7 @@ def test_cli_local_serving_does_not_enable_access_logs_or_forwarded_headers(monk
     monkeypatch.setattr(
         "api_migration_proxy.cli.uvicorn.run", lambda *a, **kw: calls.append((a, kw))
     )
-    path = Path(__file__).parents[1] / "examples/local.json"
+    path = Path(__file__).parents[1] / "fixtures/proxy.json"
     assert (
         main(
             [
@@ -360,7 +383,8 @@ def test_cli_local_serving_does_not_enable_access_logs_or_forwarded_headers(monk
     assert list(tmp_path.iterdir()) == []
 
 
-def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path):
+@pytest.mark.parametrize("policy_case", ["configured", "zero_without_policy", "stopped_zero"])
+def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path, policy_case):
     requests = []
 
     class Backend(BaseHTTPRequestHandler):
@@ -392,8 +416,34 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path):
         data["snapshot"]["allowed_backends"] = [origin]
         data["snapshot"]["routes"][0]["v1"] = origin
         data["snapshot"]["routes"][0]["v2"] = origin
+        if policy_case != "configured":
+            route = data["snapshot"]["routes"][0]
+            route["rollout_enabled"] = True
+            route["shadow"].update(
+                eligible=True,
+                sample_ratio=0,
+                stopped=policy_case == "stopped_zero",
+                review_ref="synthetic-read-only-fixture",
+            )
+            route["comparison_policy_revision"] = None
+            data["comparison_policies"] = []
         config = tmp_path / "synthetic.json"
         config.write_text(json.dumps(data))
+        checked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "api_migration_proxy.cli",
+                "check-config",
+                "--config",
+                str(config),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert checked.returncode == 0
+        assert checked.stdout == "Configuration valid.\n"
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -431,7 +481,8 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path):
             ]
             assert len(response.headers.get_list("date")) == 1
             assert client.get("/docs").json() == {"source": "synthetic-v1"}
-        assert requests == ["/items/a%2Fb?key=1&key=2", "/docs"]
+            assert client.get("/items/registered").json() == {"source": "synthetic-v1"}
+        assert requests == ["/items/a%2Fb?key=1&key=2", "/docs", "/items/registered"]
         process.send_signal(signal.SIGINT)
         process.communicate(timeout=10)
         assert process.returncode in (0, -signal.SIGINT)

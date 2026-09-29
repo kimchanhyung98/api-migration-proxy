@@ -8,10 +8,12 @@ from datetime import datetime
 import httpx
 import pytest
 
-from api_migration_proxy.collection import BatchResult, DetailPolicy, EventQuery, QueryAccess
-from api_migration_proxy.comparison import compare
-from api_migration_proxy.config import ConfigurationError, ShadowPolicy
-from api_migration_proxy.runtime import IncompleteResponse
+from api_migration_proxy.collection.collector import BatchResult
+from api_migration_proxy.collection.events import DetailPolicy
+from api_migration_proxy.collection.query import EventQuery, QueryAccess
+from api_migration_proxy.comparison.engine import compare
+from api_migration_proxy.proxy.runtime import IncompleteResponse
+from api_migration_proxy.routing.configuration import ConfigurationError, ShadowPolicy
 
 
 async def eventually(predicate):
@@ -128,6 +130,42 @@ async def test_t09_post_body_raw_path_query_and_headers_duplicate_without_mutati
         assert fields[b"x-tenant"] == b"tenant-a"
         assert b"x-remove" not in fields
         assert fields[b"host"] == backend.url.removeprefix("http://").encode()
+
+
+@pytest.mark.parametrize("serving", ["v1", "v2"])
+@pytest.mark.parametrize("raw_value", [b"{b}", b"%7Bb%7D"])
+async def test_path_mapping_preserves_parameter_values_on_both_http_backends(
+    backend_factory, runtime_factory, asgi_request, respond, serving, raw_value
+):
+    async def v1_response(_, writer):
+        await respond(writer, b'{"source":"v1"}')
+
+    async def v2_response(_, writer):
+        await respond(writer, b'{"source":"v2"}')
+
+    v1, v2 = await backend_factory(v1_response), await backend_factory(v2_response)
+    harness = await runtime_factory(
+        v1,
+        v2,
+        route_values={
+            "path_template": "/objects/{a}/{b}",
+            "v1_path_template": "/mapped-v1/{b}/{a}",
+            "v2_path_template": "/mapped-v2/{b}/{a}",
+            "v2_serve_ratio": int(serving == "v2"),
+        },
+    )
+    query = b"key=1&key=2&x=%2b"
+    exchange = await asgi_request(
+        harness.runtime, path=b"/objects/" + raw_value + b"/hello", query=query
+    ).wait()
+    await harness.runtime.flush()
+    assert exchange.status == 200
+    assert json.loads(exchange.body) == {"source": serving}
+    for backend, version in ((v1, b"v1"), (v2, b"v2")):
+        assert len(backend.requests) == 1
+        assert backend.requests[0].target == (
+            b"/mapped-" + version + b"/hello/" + raw_value + b"?" + query
+        )
 
 
 async def test_t13_slow_shadow_and_database_collection_finish_after_user_response(
@@ -712,7 +750,7 @@ async def test_t44_running_comparison_timeout_keeps_slot_until_thread_really_fin
             raise TimeoutError("test did not release comparison")
         return compare(*args)
 
-    monkeypatch.setattr("api_migration_proxy.processing.compare", blocked_compare)
+    monkeypatch.setattr("api_migration_proxy.proxy.pipeline.compare", blocked_compare)
     v1, v2 = await backend_factory(), await backend_factory()
     harness = await runtime_factory(
         v1,
@@ -953,7 +991,15 @@ async def test_t21_classifier_exception_leaves_received_http_response_intact_and
 
 
 @pytest.mark.parametrize(
-    "invalid_change", ["missing_policy", "resource_budget", "unregistered_route"]
+    "invalid_change",
+    [
+        "missing_policy",
+        "missing_policy_rollout_disabled",
+        "missing_policy_shadow_ineligible",
+        "missing_policy_shadow_zero",
+        "resource_budget",
+        "unregistered_route",
+    ],
 )
 async def test_t01_invalid_hot_configuration_keeps_last_snapshot_and_working_serving(
     backend_factory,
@@ -965,10 +1011,15 @@ async def test_t01_invalid_hot_configuration_keeps_last_snapshot_and_working_ser
     harness = await runtime_factory(v1, v2)
     before = harness.config.current
     updated = replace(before, revision="config-rejected", previous_revision=before.revision)
-    if invalid_change == "missing_policy":
-        updated = replace(
-            updated, routes=(replace(before.routes[0], comparison_policy_revision="missing"),)
-        )
+    if invalid_change.startswith("missing_policy"):
+        route = replace(before.routes[0], comparison_policy_revision="missing")
+        if invalid_change == "missing_policy_rollout_disabled":
+            route = replace(route, rollout_enabled=False)
+        elif invalid_change == "missing_policy_shadow_ineligible":
+            route = replace(route, shadow=replace(route.shadow, eligible=False))
+        elif invalid_change == "missing_policy_shadow_zero":
+            route = replace(route, shadow=replace(route.shadow, sample_ratio=0))
+        updated = replace(updated, routes=(route,))
     elif invalid_change == "resource_budget":
         updated = replace(updated, budgets=replace(before.budgets, serving_max_inflight=100))
     else:
