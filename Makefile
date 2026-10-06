@@ -4,8 +4,8 @@
 PYTHON ?= .venv/bin/python
 PYTHON_BOOTSTRAP ?= python3
 CONFIG ?=
-EVENT_STORE ?= events.sqlite
-PORT ?= 8080
+EVENT_STORE ?=
+PORT ?=
 
 .DEFAULT_GOAL := help
 
@@ -31,9 +31,8 @@ init: ## Python 가상 환경과 개발 의존성 설치
 	@test -d .venv || $(PYTHON_BOOTSTRAP) -m venv .venv
 	$(PYTHON) -m pip install -r requirements-dev.txt -e '.[test]'
 
-run: ## 설정 파일로 로컬 프록시 실행
-	@test -n "$(CONFIG)" || { echo 'CONFIG에 Proxy 설정 파일 경로를 지정하세요.' >&2; exit 2; }
-	$(PYTHON) -m api_migration_proxy.cli serve --config "$(CONFIG)" --port "$(PORT)" --event-store "$(EVENT_STORE)"
+run: ## .env 기본값 또는 선택적 JSON으로 프록시 실행
+	$(PYTHON) -m api_migration_proxy.cli serve $(if $(CONFIG),--config "$(CONFIG)") $(if $(PORT),--port "$(PORT)") $(if $(EVENT_STORE),--event-store "$(EVENT_STORE)")
 
 docker-build: ## Proxy 전용 실행 이미지 빌드
 	docker build --target runtime -t api-migration-proxy .

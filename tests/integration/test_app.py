@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -14,12 +15,12 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from api_migration_proxy.app import create_app, create_control_app
+from api_migration_proxy.app import control_authorizer, create_app, create_control_app
 from api_migration_proxy.collection.collector import BatchResult
 from api_migration_proxy.observability.metrics import Metrics
-from api_migration_proxy.observability.prometheus import prometheus_text
 
 
 class RuntimeDouble:
@@ -70,7 +71,15 @@ def test_data_plane_lifecycle_and_unmodified_public_paths():
     runtime = RuntimeDouble()
     with TestClient(create_app(runtime)) as client:
         assert runtime.started == 1
-        for path in ("/docs", "/openapi.json", "/health/live", "/metrics", "/state", "/items/42/"):
+        for path in (
+            "/docs",
+            "/openapi.json",
+            "/healthcheck",
+            "/health/live",
+            "/metrics",
+            "/state",
+            "/items/42/",
+        ):
             response = client.get(path)
             assert response.status_code == 201
             assert response.content == b"backend"
@@ -97,11 +106,33 @@ def test_lifespan_closes_resources_if_start_fails():
     assert runtime.closed == 1
 
 
-@pytest.mark.parametrize("path", ["/health/live", "/health/ready", "/metrics", "/state"])
-def test_control_endpoints_require_explicit_authorization(path):
+async def test_default_control_does_not_register_observation_routes_or_disable_collection(
+    backend_factory, runtime_factory, asgi_request
+):
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(v1, v2)
+    app = create_control_app(harness.runtime, authorize=lambda request: True)
+    assert {route.path for route in app.routes} == {"/healthcheck"}
+    exchange = await asgi_request(harness.runtime).wait()
+    assert exchange.status == 200
+    await harness.runtime.flush()
+    assert harness.metrics.value("proxy_assignments_total", route="catalog", serving="v1") == 1
+    assert harness.metrics.value("comparison_pipeline_total", route="catalog", step="stored") == 1
+    assert len(await harness.records()) == 1
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://control.test"
+    ) as client:
+        for path in ("/metrics", "/state", "/health/live", "/health/ready"):
+            assert (await client.get(path)).status_code == 404
+        assert (await client.get("/healthcheck")).json() == {"ready": True}
+
+
+def test_healthcheck_requires_explicit_authorization():
     runtime = RuntimeDouble()
-    with TestClient(create_control_app(runtime, authorize=lambda request: False)) as client:
-        response = client.get(path)
+    with TestClient(
+        create_control_app(runtime, authorize=lambda request: False), client=("127.0.0.1", 1234)
+    ) as client:
+        response = client.get("/healthcheck")
         assert response.status_code == 403
         assert response.json() == {"detail": "Access denied"}
     assert runtime.started == 0
@@ -114,22 +145,21 @@ def test_control_readiness_and_async_authorization():
     async def authorize(request):
         return request.headers.get("x-test-access") == "allow"
 
-    with TestClient(create_control_app(runtime, authorize=authorize)) as client:
-        assert client.get("/health/live").status_code == 403
+    with TestClient(
+        create_control_app(runtime, authorize=authorize), client=("127.0.0.1", 1234)
+    ) as client:
+        assert client.get("/healthcheck").status_code == 403
         headers = {"x-test-access": "allow"}
-        assert client.get("/health/live", headers=headers).json() == {"status": "alive"}
-        response = client.get("/health/ready", headers=headers)
+        response = client.get("/healthcheck", headers=headers)
         assert response.status_code == 503
-        assert response.json() == {"ready": False, "revision": None}
-        runtime.config.current = SimpleNamespace(revision="revision-2")
+        assert response.json() == {"ready": False}
+        runtime.config.current = SimpleNamespace(revision="revision-2", routes=[])
         runtime.ready = True
-        response = client.get("/health/ready", headers=headers)
+        response = client.get("/healthcheck", headers=headers)
         assert response.status_code == 200
-        assert response.json() == {"ready": True, "revision": "revision-2"}
-        assert client.get("/state", headers=headers).json() == {
-            "worker_id": "local",
-            "collection": {"completeness_known": False},
-        }
+        assert response.json() == {"ready": True}
+        for path in ("/health/live", "/health/ready", "/metrics", "/state"):
+            assert client.get(path, headers=headers).status_code == 404
         assert client.get("/docs", headers=headers).status_code == 404
         assert client.get("/openapi.json", headers=headers).status_code == 404
 
@@ -140,45 +170,138 @@ def test_control_access_errors_are_closed_and_sanitized():
     def authorize(request):
         raise ValueError("sensitive authorization response")
 
-    with TestClient(create_control_app(runtime, authorize=authorize)) as client:
-        response = client.get("/metrics")
+    with TestClient(
+        create_control_app(runtime, authorize=authorize), client=("127.0.0.1", 1234)
+    ) as client:
+        response = client.get("/healthcheck")
         assert response.status_code == 503
         assert "sensitive" not in response.text
 
 
-def test_metrics_exposition_preserves_counters_and_histogram_buckets():
+@pytest.mark.parametrize(
+    ("peer", "allowed"),
+    [
+        (("127.0.0.1", 1234), True),
+        (("::1", 1234), True),
+        (("192.0.2.1", 1234), False),
+        (("localhost", 1234), False),
+        (None, False),
+    ],
+)
+@pytest.mark.parametrize("token", ["", "expected-token"])
+def test_control_uses_actual_loopback_peer_even_with_valid_token(peer, allowed, token):
+    request = Request(
+        {
+            "type": "http",
+            "client": peer,
+            "headers": [
+                (b"authorization", b"Bearer expected-token"),
+                (b"x-forwarded-for", b"127.0.0.1"),
+                (b"forwarded", b"for=127.0.0.1"),
+            ],
+        }
+    )
+    assert control_authorizer(token)(request) is allowed
+
+
+@pytest.mark.parametrize("peer,status", [("127.0.0.1", 200), ("192.0.2.1", 403)])
+async def test_healthcheck_rejects_remote_peer_with_valid_token(peer, status):
+    runtime = RuntimeDouble()
+    runtime.ready = True
+    app = create_control_app(runtime, authorize=control_authorizer("expected-token"))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(peer, 1234)),
+        base_url="http://control.test",
+    ) as client:
+        response = await client.get(
+            "/healthcheck",
+            headers={
+                "Authorization": "Bearer expected-token",
+                "X-Forwarded-For": "127.0.0.1",
+                "Forwarded": "for=127.0.0.1",
+            },
+        )
+    assert response.status_code == status
+    assert response.json() == ({"ready": True} if status == 200 else {"detail": "Access denied"})
+
+
+@pytest.mark.parametrize(
+    "peer,status",
+    [("127.0.0.1", 200), ("::1", 200), ("192.0.2.1", 403), ("2001:db8::1", 403)],
+)
+@pytest.mark.parametrize("async_authorizer", [False, True])
+async def test_custom_authorizer_cannot_bypass_healthcheck_loopback(peer, status, async_authorizer):
+    runtime = RuntimeDouble()
+    runtime.ready = True
+    calls = []
+
+    def authorize(request):
+        calls.append(request)
+        return True
+
+    async def authorize_async(request):
+        return authorize(request)
+
+    app = create_control_app(runtime, authorize=authorize_async if async_authorizer else authorize)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(peer, 1234)),
+        base_url="http://control.test",
+    ) as client:
+        response = await client.get(
+            "/healthcheck",
+            headers={"X-Forwarded-For": "127.0.0.1", "Forwarded": "for=127.0.0.1"},
+        )
+    assert response.status_code == status
+    assert len(calls) == (1 if status == 200 else 0)
+
+
+def test_control_token_rejects_ambiguous_duplicate_authorization():
+    request = Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 1234),
+            "headers": [
+                (b"authorization", b"Bearer expected-token"),
+                (b"authorization", b"Bearer other-token"),
+            ],
+        }
+    )
+    assert control_authorizer("expected-token")(request) is False
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+def test_control_bearer_scheme_is_case_insensitive(scheme):
+    request = Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 1234),
+            "headers": [(b"authorization", f"{scheme} expected-token".encode())],
+        }
+    )
+    assert control_authorizer("expected-token")(request) is True
+
+
+def test_internal_metrics_preserve_counters_and_histogram_buckets():
     runtime = RuntimeDouble()
     runtime.metrics.increment("proxy_assignments_total", route="registered", serving="v1")
     runtime.metrics.observe(
         "proxy_request_duration_seconds", 0.006, route="registered", serving="v1"
     )
     runtime.metrics.set_gauge("backend_inflight", 2, backend="v1", role="serving")
-    with TestClient(create_control_app(runtime, authorize=lambda request: True)) as client:
-        response = client.get("/metrics")
-    assert response.status_code == 200
-    assert "text/plain; version=0.0.4" in response.headers["content-type"]
-    assert "# TYPE proxy_assignments_total counter\n" in response.text
-    assert 'proxy_assignments_total{route="registered",serving="v1"} 1\n' in response.text
-    assert 'backend_inflight{backend="v1",role="serving"} 2\n' in response.text
-    assert (
-        'proxy_request_duration_seconds_bucket{route="registered",serving="v1",le="0.005"} 0'
-        in response.text
-    )
-    assert (
-        'proxy_request_duration_seconds_bucket{route="registered",serving="v1",le="0.01"} 1'
-        in response.text
-    )
-    assert (
-        'proxy_request_duration_seconds_bucket{route="registered",serving="v1",le="+Inf"} 1'
-        in response.text
-    )
-    assert (
-        'proxy_request_duration_seconds_count{route="registered",serving="v1"} 1' in response.text
-    )
-    assert prometheus_text(Metrics({"registered"}).snapshot()) == ""
+    snapshot = runtime.metric_snapshot()
+    route_labels = (("route", "registered"), ("serving", "v1"))
+    assert snapshot.counters[("proxy_assignments_total", route_labels)] == 1
+    assert snapshot.gauges[("backend_inflight", (("backend", "v1"), ("role", "serving")))] == 2
+    histogram = snapshot.histograms[("proxy_request_duration_seconds", route_labels)]
+    assert histogram.buckets[histogram.bounds.index(0.005)] == 0
+    assert histogram.buckets[histogram.bounds.index(0.01)] == 1
+    assert histogram.count == 1
+    assert histogram.total == 0.006
+    empty = Metrics({"registered"}).snapshot()
+    assert empty.counters == empty.gauges == empty.histograms == {}
 
 
-async def test_control_exports_live_collection_pending_and_acknowledgement(
+async def test_internal_metrics_report_live_collection_pending_and_acknowledgement(
     backend_factory, runtime_factory, asgi_request
 ):
     entered, release = asyncio.Event(), asyncio.Event()
@@ -200,35 +323,35 @@ async def test_control_exports_live_collection_pending_and_acknowledgement(
     exchange = await asgi_request(harness.runtime).wait()
     assert exchange.status == 200
     await asyncio.wait_for(entered.wait(), 2)
-    app = create_control_app(harness.runtime, authorize=lambda request: True)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://control.test"
-    ) as client:
-        try:
-            pending = await client.get("/metrics")
-            assert pending.status_code == 200
-            assert "collection_queue_depth 1.0\n" in pending.text
-            assert "collection_oldest_age_seconds " in pending.text
-            assert "collection_write_failures_total 0\n" in pending.text
-            state = (await client.get("/state")).json()
-            assert state["scope"] == "current_process"
-            assert state["collection"]["queue_depth"] == 1
-            assert state["collection"]["queue_bytes"] > 0
-            assert state["collection"]["oldest_age_seconds"] >= 0
-            assert state["collection"].get("stored", 0) == 0
-        finally:
-            release.set()
-        await harness.runtime.flush()
-        completed = await client.get("/metrics")
-        assert "collection_queue_depth 0.0\n" in completed.text
-        assert "collection_oldest_age_seconds 0.0\n" in completed.text
-        assert 'comparison_pipeline_total{route="catalog",step="stored"} 1\n' in completed.text
-        state = (await client.get("/state")).json()
-        assert state["collection"]["stored"] == 1
-        assert state["collection"]["queue_bytes"] == 0
+    try:
+        pending = harness.runtime.metric_snapshot()
+        assert pending.gauges[("collection_queue_depth", ())] == 1
+        assert pending.gauges[("collection_oldest_age_seconds", ())] >= 0
+        assert pending.counters[("collection_write_failures_total", ())] == 0
+        state = harness.runtime.observation_status()
+        assert state["scope"] == "current_process"
+        assert state["collection"]["queue_depth"] == 1
+        assert state["collection"]["queue_bytes"] > 0
+        assert state["collection"]["oldest_age_seconds"] >= 0
+        assert state["collection"].get("stored", 0) == 0
+    finally:
+        release.set()
+    await harness.runtime.flush()
+    completed = harness.runtime.metric_snapshot()
+    assert completed.gauges[("collection_queue_depth", ())] == 0
+    assert completed.gauges[("collection_oldest_age_seconds", ())] == 0
+    assert (
+        completed.counters[
+            ("comparison_pipeline_total", (("route", "catalog"), ("step", "stored")))
+        ]
+        == 1
+    )
+    state = harness.runtime.observation_status()
+    assert state["collection"]["stored"] == 1
+    assert state["collection"]["queue_bytes"] == 0
 
 
-async def test_control_exports_storage_failure_without_counting_scrapes_as_writes(
+async def test_internal_metrics_report_storage_failure_without_counting_reads_as_writes(
     backend_factory, runtime_factory, asgi_request
 ):
     class FailedStore:
@@ -248,39 +371,275 @@ async def test_control_exports_storage_failure_without_counting_scrapes_as_write
     exchange = await asgi_request(harness.runtime).wait()
     assert exchange.status == 200
     await harness.runtime.flush()
-    app = create_control_app(harness.runtime, authorize=lambda request: True)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://control.test"
-    ) as client:
-        first = await client.get("/metrics")
-        second = await client.get("/metrics")
-        assert first.status_code == second.status_code == 200
-        assert first.text == second.text
-        assert "collection_write_failures_total 2\n" in first.text
-        assert "collection_queue_depth 0.0\n" in first.text
-        assert 'collection_dropped_total{reason="retry_exhausted"} 1\n' in first.text
-        assert 'comparison_pipeline_total{route="catalog",step="stored"}' not in first.text
-        state = (await client.get("/state")).json()
-        assert state["scope"] == "current_process"
-        assert state["collection"]["write_failures"] == 2
-        assert state["collection"]["dropped_retry_exhausted"] == 1
-        assert state["collection"]["completeness_known"] is True
+    first = harness.runtime.metric_snapshot()
+    second = harness.runtime.metric_snapshot()
+    assert first == second
+    assert first.counters[("collection_write_failures_total", ())] == 2
+    assert first.gauges[("collection_queue_depth", ())] == 0
+    assert first.counters[("collection_dropped_total", (("reason", "retry_exhausted"),))] == 1
+    assert (
+        "comparison_pipeline_total",
+        (("route", "catalog"), ("step", "stored")),
+    ) not in first.counters
+    state = harness.runtime.observation_status()
+    assert state["scope"] == "current_process"
+    assert state["collection"]["write_failures"] == 2
+    assert state["collection"]["dropped_retry_exhausted"] == 1
+    assert state["collection"]["completeness_known"] is True
 
 
 def example_settings():
     return json.loads((Path(__file__).parents[1] / "fixtures/proxy.json").read_text())
 
 
-def test_cli_config_check_validates_without_starting_server(monkeypatch, capsys):
+@pytest.fixture
+def cli_environment(monkeypatch, tmp_path):
+    for name in os.environ:
+        if name.startswith("API_PROXY_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+
+
+def test_cli_config_check_validates_without_starting_server(monkeypatch, capsys, cli_environment):
     from api_migration_proxy.cli import main
 
     def forbidden(*args, **kwargs):
         pytest.fail("configuration checking must not start a server")
 
-    monkeypatch.setattr("api_migration_proxy.cli.uvicorn.run", forbidden)
+    monkeypatch.setattr("api_migration_proxy.cli.run_server", forbidden)
+    monkeypatch.setattr("api_migration_proxy.cli.SQLiteEventStore", forbidden)
     path = Path(__file__).parents[1] / "fixtures/proxy.json"
     assert main(["check-config", "--config", str(path)]) == 0
     assert capsys.readouterr().out == "Configuration valid.\n"
+
+
+def test_postgresql_config_check_is_offline_and_explains_only_safe_run_options(
+    monkeypatch, tmp_path, capsys, cli_environment
+):
+    from api_migration_proxy.cli import main
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration checking must not construct storage or start background work")
+
+    monkeypatch.setattr("api_migration_proxy.cli.PostgreSQLEventStore", forbidden)
+    monkeypatch.setattr("api_migration_proxy.cli.RetentionWorker", forbidden)
+    monkeypatch.setattr("api_migration_proxy.cli.run_server", forbidden)
+    env = tmp_path / "postgres.env"
+    env.write_text(
+        "API_PROXY_EVENT_STORE_BACKEND=postgresql\n"
+        "API_PROXY_POSTGRES_DSN=postgresql://operator:sensitive-password@private-db/events\n"
+        "API_PROXY_EVENT_STORE=private-file.sqlite\n"
+        "API_PROXY_EXPOSE_OBSERVABILITY=true\n"
+        "API_PROXY_RETENTION_INTERVAL_SECONDS=1.5\n"
+        "API_PROXY_RETENTION_BATCH_SIZE=23\n"
+    )
+    assert main(["check-config", "--env-file", str(env), "--explain"]) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output.splitlines()[1])
+    assert report["runtime"] == {
+        "event_store_backend": "postgresql",
+        "retention_interval_seconds": 1.5,
+        "retention_batch_size": 23,
+    }
+    assert "sensitive-password" not in output
+    assert "private-db" not in output
+    assert "private-file" not in output
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgresql"])
+def test_cli_selects_store_and_attaches_internal_retention(
+    monkeypatch, tmp_path, cli_environment, backend
+):
+    from api_migration_proxy.cli import main
+
+    stores, workers, runtimes = [], [], []
+
+    def store_factory(value, *, create=True):
+        store = SimpleNamespace(value=value, create=create)
+        stores.append(store)
+        return store
+
+    def worker_factory(store, **kwargs):
+        worker = SimpleNamespace(store=store, **kwargs)
+        workers.append(worker)
+        return worker
+
+    def runtime_factory(*args, **kwargs):
+        runtime = SimpleNamespace(**kwargs)
+        runtimes.append(runtime)
+        return runtime
+
+    selected = "PostgreSQLEventStore" if backend == "postgresql" else "SQLiteEventStore"
+    other = "SQLiteEventStore" if backend == "postgresql" else "PostgreSQLEventStore"
+    monkeypatch.setattr(f"api_migration_proxy.cli.{selected}", store_factory)
+    monkeypatch.setattr(
+        f"api_migration_proxy.cli.{other}", lambda *_a, **_kw: pytest.fail("wrong adapter")
+    )
+    monkeypatch.setattr("api_migration_proxy.cli.RetentionWorker", worker_factory)
+    monkeypatch.setattr("api_migration_proxy.cli.ProxyRuntime", runtime_factory)
+    monkeypatch.setattr("api_migration_proxy.cli.run_server", lambda *_: 0)
+    monkeypatch.setenv("API_PROXY_EVENT_STORE_BACKEND", backend)
+    monkeypatch.setenv("API_PROXY_POSTGRES_DSN", "postgresql://operator:sensitive@localhost/events")
+    monkeypatch.setenv("API_PROXY_RETENTION_INTERVAL_SECONDS", "0.5")
+    monkeypatch.setenv("API_PROXY_RETENTION_BATCH_SIZE", "17")
+    assert main(["serve"]) == 0
+    assert len(stores) == len(workers) == len(runtimes) == 1
+    assert stores[0].value == (
+        "postgresql://operator:sensitive@localhost/events"
+        if backend == "postgresql"
+        else "events.sqlite"
+    )
+    assert stores[0].create is True
+    assert workers[0].store is stores[0]
+    assert workers[0].interval_seconds == 0.5
+    assert workers[0].batch_size == 17
+    assert runtimes[0].maintenance is workers[0]
+
+
+def test_explicit_sqlite_path_overrides_postgresql_environment_for_serving_and_cleanup(
+    monkeypatch, tmp_path, capsys, cli_environment
+):
+    from api_migration_proxy.cli import main
+
+    calls = []
+
+    class Store:
+        def __init__(self, path, *, create=True):
+            calls.append((path, create))
+
+        async def purge_expired(self, *, batch_size):
+            return {"details_deleted": 0, "summaries_deleted": 0, "expired_pending": 0}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setenv("API_PROXY_EVENT_STORE_BACKEND", "postgresql")
+    monkeypatch.setenv("API_PROXY_POSTGRES_DSN", "")
+    monkeypatch.setattr("api_migration_proxy.cli.SQLiteEventStore", Store)
+    monkeypatch.setattr(
+        "api_migration_proxy.cli.PostgreSQLEventStore",
+        lambda *_a, **_kw: pytest.fail("wrong adapter"),
+    )
+    monkeypatch.setattr("api_migration_proxy.cli.run_server", lambda *_: 0)
+    assert main(["serve", "--event-store", "explicit.sqlite"]) == 0
+    assert main(["purge-events", "--event-store", "explicit.sqlite", "--batch-size", "1"]) == 0
+    assert calls == [("explicit.sqlite", True), ("explicit.sqlite", False)]
+    assert json.loads(capsys.readouterr().out)["expired_pending"] == 0
+
+
+def test_cli_does_not_print_storage_constructor_errors(monkeypatch, capsys, cli_environment):
+    from api_migration_proxy.cli import main
+
+    def fail(*args, **kwargs):
+        raise TimeoutError("postgresql://operator:sensitive-password@private-db/events")
+
+    monkeypatch.setenv("API_PROXY_EVENT_STORE_BACKEND", "postgresql")
+    monkeypatch.setenv(
+        "API_PROXY_POSTGRES_DSN", "postgresql://operator:sensitive-password@private-db/events"
+    )
+    monkeypatch.setattr("api_migration_proxy.cli.PostgreSQLEventStore", fail)
+    assert main(["serve"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Proxy execution failed; verify configuration and retry.\n"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_cli_postgresql_purge_uses_env_dsn_without_initializing_and_redacts_errors(
+    monkeypatch, tmp_path, capsys, cli_environment, fails
+):
+    from api_migration_proxy.cli import main
+
+    calls = []
+
+    class Store:
+        def __init__(self, dsn, *, create):
+            calls.append((dsn, create))
+
+        async def purge_expired(self, *, batch_size):
+            calls.append(batch_size)
+            if fails:
+                raise TimeoutError("sensitive-password DB operation timed out")
+            return {"details_deleted": 1, "summaries_deleted": 2, "expired_pending": 3}
+
+        async def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr("api_migration_proxy.cli.PostgreSQLEventStore", Store)
+    env = tmp_path / "postgres.env"
+    env.write_text(
+        "API_PROXY_EVENT_STORE_BACKEND=postgresql\n"
+        "API_PROXY_POSTGRES_DSN=postgresql://operator:sensitive-password@private-db/events\n"
+    )
+    assert main(["purge-events", "--env-file", str(env), "--batch-size", "7"]) == (
+        2 if fails else 0
+    )
+    output = capsys.readouterr()
+    assert calls == [
+        ("postgresql://operator:sensitive-password@private-db/events", False),
+        7,
+        "closed",
+    ]
+    assert "sensitive-password" not in output.out + output.err
+    if fails:
+        assert output.out == ""
+        assert output.err == "Event cleanup failed; verify the store and retry.\n"
+    else:
+        assert json.loads(output.out) == {
+            "details_deleted": 1,
+            "summaries_deleted": 2,
+            "expired_pending": 3,
+        }
+
+
+@pytest.mark.parametrize(
+    "absolute,body_value,expected",
+    [
+        ("0.099999999999999999999", "0.1", "different"),
+        ('"0.099999999999999999999"', "0.1", "different"),
+        ("0.100000000000000000001", "0.100000000000000000001", "matched"),
+        ('"0.100000000000000000001"', "0.100000000000000000001", "matched"),
+        ("0.1", "0.1", "matched"),
+        ("1", "1", "matched"),
+    ],
+)
+def test_json_tolerance_preserves_exact_comparison_boundary(
+    tmp_path, absolute, body_value, expected
+):
+    from api_migration_proxy.comparison.engine import BackendResponse, ComparisonContext, compare
+    from api_migration_proxy.settings import load_settings
+
+    data = example_settings()
+    data["comparison_policies"][0]["tolerances"] = [
+        {"path": "/id", "absolute": "TOLERANCE_LITERAL"}
+    ]
+    data["snapshot"]["budgets"]["serving_timeout_seconds"] = 0.25
+    data["snapshot"]["routes"][0]["v2_serve_ratio"] = 0.5
+    data["work_limits"]["compare_timeout_seconds"] = 0.25
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(data).replace('"TOLERANCE_LITERAL"', absolute))
+
+    settings = load_settings(path)
+    policy = next(iter(settings.comparison_policies.values()))
+    result = compare(
+        BackendResponse("v1", "serving", "http_response", "success", 200, body=b'{"id":0}'),
+        BackendResponse(
+            "v2",
+            "shadow",
+            "http_response",
+            "success",
+            200,
+            body=f'{{"id":{body_value}}}'.encode(),
+        ),
+        policy,
+        ComparisonContext(True, True, True),
+    )
+
+    assert result.result == expected
+    assert type(settings.snapshot.budgets.serving_timeout_seconds) is float
+    assert type(settings.snapshot.routes[0].v2_serve_ratio) is float
+    assert type(settings.work_limits.compare_timeout_seconds) is float
+    assert type(settings.collection_limits.retry_delay_seconds) is float
 
 
 @pytest.mark.parametrize(
@@ -298,7 +657,9 @@ def test_cli_config_check_validates_without_starting_server(monkeypatch, capsys)
         "rule_field",
     ],
 )
-def test_cli_rejects_invalid_configuration_without_values_in_output(tmp_path, capsys, case):
+def test_cli_rejects_invalid_configuration_without_values_in_output(
+    tmp_path, capsys, case, cli_environment
+):
     from api_migration_proxy.cli import main
 
     data = example_settings()
@@ -340,24 +701,32 @@ def test_cli_rejects_invalid_configuration_without_values_in_output(tmp_path, ca
     assert result.err == "Configuration could not be loaded or validated.\n"
 
 
-def test_cli_requires_explicit_event_store_and_valid_port(capsys):
+def test_cli_defaults_event_store_and_requires_valid_port(monkeypatch, tmp_path, cli_environment):
     from api_migration_proxy.cli import main
 
-    with pytest.raises(SystemExit) as error:
-        main(["serve", "--config", "example.json", "--port", "8080"])
-    assert error.value.code == 2
+    calls = []
+    monkeypatch.setattr(
+        "api_migration_proxy.cli.run_server", lambda runtime, options: calls.append(options) or 0
+    )
+    path = Path(__file__).parents[1] / "fixtures/proxy.json"
+    assert main(["serve", "--config", str(path), "--port", "8080"]) == 0
+    assert calls[0].event_store == "events.sqlite"
+    assert list(tmp_path.iterdir()) == []
     with pytest.raises(SystemExit) as error:
         main(["serve", "--config", "example.json", "--port", "65536", "--event-store", ":memory:"])
     assert error.value.code == 2
 
 
-def test_cli_local_serving_does_not_enable_access_logs_or_forwarded_headers(monkeypatch, tmp_path):
+def test_cli_local_serving_does_not_enable_access_logs_or_forwarded_headers(
+    monkeypatch, tmp_path, cli_environment
+):
     from api_migration_proxy.cli import main
 
     calls = []
     monkeypatch.setattr(
-        "api_migration_proxy.cli.uvicorn.run", lambda *a, **kw: calls.append((a, kw))
+        "api_migration_proxy.server.uvicorn.run", lambda *a, **kw: calls.append((a, kw))
     )
+    monkeypatch.setenv("API_PROXY_CONTROL_ENABLED", "false")
     path = Path(__file__).parents[1] / "fixtures/proxy.json"
     assert (
         main(
@@ -380,11 +749,101 @@ def test_cli_local_serving_does_not_enable_access_logs_or_forwarded_headers(monk
     assert options["workers"] == 1
     assert options["access_log"] is False
     assert options["proxy_headers"] is False
+    assert options["timeout_graceful_shutdown"] == 5
     assert list(tmp_path.iterdir()) == []
 
 
+def test_cli_explicit_options_override_environment_and_selected_env_file(
+    monkeypatch, tmp_path, cli_environment
+):
+    from api_migration_proxy.cli import main
+
+    env_file = tmp_path / "chosen.env"
+    env_file.write_text("API_PROXY_CONTROL_ENABLED=false\nAPI_PROXY_PORT=8082\n")
+    monkeypatch.setenv("API_PROXY_CONFIG", "missing-sensitive-file.json")
+    monkeypatch.setenv("API_PROXY_HOST", "0.0.0.0")
+    monkeypatch.setenv("API_PROXY_PORT", "invalid")
+    monkeypatch.setenv("API_PROXY_EVENT_STORE", "environment.sqlite")
+    calls = []
+    monkeypatch.setattr(
+        "api_migration_proxy.cli.run_server",
+        lambda runtime, options: calls.append((runtime, options)) or 0,
+    )
+    config = Path(__file__).parents[1] / "fixtures/proxy.json"
+    assert (
+        main(
+            [
+                "serve",
+                "--env-file",
+                str(env_file),
+                "--config",
+                str(config),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8083",
+                "--event-store",
+                "explicit.sqlite",
+            ]
+        )
+        == 0
+    )
+    runtime, options = calls[0]
+    assert runtime.config.current.revision == "configuration-fixture-1"
+    assert options.host == "127.0.0.1"
+    assert options.port == 8083
+    assert options.event_store == "explicit.sqlite"
+    assert options.control_enabled is False
+
+
+@pytest.mark.parametrize("mode", ["request", "user", "session", "tenant"])
+def test_cli_explain_reports_effective_capabilities_without_secrets(
+    monkeypatch, tmp_path, capsys, cli_environment, mode
+):
+    from api_migration_proxy.cli import main
+
+    data = example_settings()
+    route = data["snapshot"]["routes"][0]
+    route.update(rollout_enabled=True, v2_serve_ratio=1)
+    route["cohort"].update(mode=mode, key_source="request" if mode == "request" else "identity")
+    route["shadow"].update(eligible=True, sample_ratio=1, review_ref="approved-review")
+    config = tmp_path / "settings.json"
+    config.write_text(json.dumps(data))
+    monkeypatch.setenv("API_PROXY_CONTROL_TOKEN", "private-test-token")
+    assert main(["check-config", "--config", str(config), "--explain"]) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output.splitlines()[1])
+    assert report["scope"] == "configuration_only"
+    assert report["mode"] == "json"
+    assert report["routes"][0]["cohort_mode"] == mode
+    assert report["routes"][0]["effective_v2_serve_ratio"] == (1 if mode == "request" else 0)
+    assert report["routes"][0]["shadow_enabled"] is (mode == "request")
+    assert bool(report["routes"][0]["warnings"]) is (mode != "request")
+    assert not any(report["capabilities"].values())
+    for value in ("v1.example.invalid", "v2.example.invalid", "fixture-salt", "private-test-token"):
+        assert value not in output
+
+
+async def test_internal_status_excludes_backend_addresses_and_credentials(
+    runtime_factory, backend_factory
+):
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(v1, v2)
+    snapshot = harness.runtime.config.current
+    route = snapshot.routes[0]
+    state = harness.runtime.observation_status()
+    assert state["scope"] == "current_process"
+    assert set(state["worker_revisions"].values()) == {snapshot.revision}
+    serialized = json.dumps(state)
+    for value in (route.v1, route.v2, route.cohort.salt):
+        assert value not in serialized
+
+
 @pytest.mark.parametrize("policy_case", ["configured", "zero_without_policy", "stopped_zero"])
-def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path, policy_case):
+def test_cli_process_forwards_real_loopback_http_and_shuts_down(
+    monkeypatch, tmp_path, policy_case, cli_environment
+):
+    monkeypatch.setenv("API_PROXY_CONTROL_ENABLED", "false")
     requests = []
 
     class Backend(BaseHTTPRequestHandler):
@@ -493,53 +952,3 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path, policy
         backend.shutdown()
         backend.server_close()
         thread.join(timeout=5)
-
-
-@pytest.mark.parametrize(
-    "absolute,body_value,expected",
-    [
-        ("0.099999999999999999999", "0.1", "different"),
-        ('"0.099999999999999999999"', "0.1", "different"),
-        ("0.100000000000000000001", "0.100000000000000000001", "matched"),
-        ('"0.100000000000000000001"', "0.100000000000000000001", "matched"),
-        ("0.1", "0.1", "matched"),
-        ("1", "1", "matched"),
-    ],
-)
-def test_json_tolerance_preserves_exact_comparison_boundary(
-    tmp_path, absolute, body_value, expected
-):
-    from api_migration_proxy.comparison.engine import BackendResponse, ComparisonContext, compare
-    from api_migration_proxy.settings import load_settings
-
-    data = example_settings()
-    data["comparison_policies"][0]["tolerances"] = [
-        {"path": "/id", "absolute": "TOLERANCE_LITERAL"}
-    ]
-    data["snapshot"]["budgets"]["serving_timeout_seconds"] = 0.25
-    data["snapshot"]["routes"][0]["v2_serve_ratio"] = 0.5
-    data["work_limits"]["compare_timeout_seconds"] = 0.25
-    path = tmp_path / "settings.json"
-    path.write_text(json.dumps(data).replace('"TOLERANCE_LITERAL"', absolute))
-
-    settings = load_settings(path)
-    policy = next(iter(settings.comparison_policies.values()))
-    result = compare(
-        BackendResponse("v1", "serving", "http_response", "success", 200, body=b'{"id":0}'),
-        BackendResponse(
-            "v2",
-            "shadow",
-            "http_response",
-            "success",
-            200,
-            body=f'{{"id":{body_value}}}'.encode(),
-        ),
-        policy,
-        ComparisonContext(True, True, True),
-    )
-
-    assert result.result == expected
-    assert type(settings.snapshot.budgets.serving_timeout_seconds) is float
-    assert type(settings.snapshot.routes[0].v2_serve_ratio) is float
-    assert type(settings.work_limits.compare_timeout_seconds) is float
-    assert type(settings.collection_limits.retry_delay_seconds) is float

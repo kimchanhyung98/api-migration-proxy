@@ -12,6 +12,7 @@ dependencies = [
     "httpcore==1.0.9",
     "httpx==0.28.1",
     "psycopg[binary]==3.3.6",
+    "python-dotenv==1.2.3",
     "uvicorn>=0.34,<1",
 ]
 

@@ -1,5 +1,6 @@
 **
 !Dockerfile
+!.env.example
 !pyproject.toml
 !requirements-dev.txt
 !src/
