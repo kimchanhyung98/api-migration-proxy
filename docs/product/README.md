@@ -1,8 +1,10 @@
 # 제품
 
-제품 목적·적용 범위·사용자 흐름·요구사항과 위험을 정의한다.
+이 문서 모음은 API Migration Proxy의 목적, 적용 가능한 API, 담당자의 행동, 제품 요구사항과 위험 대응 기준을 정의한다. serving, shadow, cohort 등의 용어는 [공통 용어](../_rules/glossary.md)를 따른다.
 
-부작용 없는 조회 API부터 양쪽 실행 결과를 확인하고, 사용자 응답을 점진적으로 v2로 전환한다. 프록시는 검증과 전환을 위한 임시 구성으로, 종료 조건을 충족하면 제거한다.
+제품은 부작용이 없다고 확인한 조회 API부터 적용한다. 프록시는 사용자 응답을 v1에서 제공하는 동안 복제 대상으로 선택한 요청을 v2에서도 실행한다. 마이그레이션 담당자는 양쪽 실행 결과와 관측 누락을 확인해야 한다. 해당 단계의 증거가 전환 기준을 충족한 경우에만 사용자 응답의 v2 비율을 확대해야 한다. 양쪽 실행이 끝났거나 응답이 같다는 사실만으로 전환 성공을 판정해서는 안 된다.
+
+프록시는 검증과 전환을 위한 임시 구성이다. 전체 v2 serving, v1 shadow 종료, v1 사용 종료, 프록시 제거는 서로 다른 완료 상태이다. 각 상태의 완료 조건은 [전환 단계](../rollout/stages-and-gates.md)와 [종료 기준](../rollout/retirement.md)에 따라 확인해야 한다.
 
 ```mermaid
 flowchart LR
@@ -17,16 +19,16 @@ flowchart LR
 
 | 기능 | 상세 범위 |
 | --- | --- |
-| [제품 개요와 경계](overview.md) | 목적, 책임, 성공 지표와 전체 흐름 |
-| [적용 범위와 사용자 흐름](scope-and-workflows.md) | 사용 시나리오, MVP, 제외 범위와 불변식 |
-| [제품 요구와 설계 기준](decisions.md) | 현행 설계·재검토 조건·위험·대응 기준 |
+| [제품 개요와 경계](overview.md) | 제품이 해결하는 문제, 담당자별 책임, 성공 지표와 전체 적용 흐름을 정의한다. |
+| [적용 범위와 사용자 흐름](scope-and-workflows.md) | 사용 시나리오별 조건, 운영자의 단계별 행동, 초기 범위와 보존해야 할 불변식을 정의한다. |
+| [제품 요구와 설계 기준](decisions.md) | 현행 설계 기준, 재검토 조건, 주요 위험과 대응의 한계를 정의한다. |
 
 ## 공통 기준과 참고자료
 
 | 문서 | 상세 범위 |
 | --- | --- |
-| [공통 용어](../_rules/glossary.md) | serving·shadow·cohort·event·stage의 의미 |
-| [Elasticsearch 방식의 API 적용](../research/elasticsearch-reference.md) | 전환 원리·데이터 책임·외부 시스템의 적용 경계 |
-| [리팩토링·마이그레이션 패턴](../research/refactoring-and-migration.md) | 점진적 교체·비노출 실행·임시 구성의 근거 |
+| [공통 용어](../_rules/glossary.md) | serving, shadow, cohort, event, stage의 의미를 정의한다. |
+| [Elasticsearch 방식의 API 적용](../research/elasticsearch-reference.md) | 일반 API에 적용하는 전환 원리와 외부 시스템이 담당하는 데이터 책임을 설명한다. |
+| [리팩토링·마이그레이션 패턴](../research/refactoring-and-migration.md) | 점진적 교체, 사용자에게 노출하지 않는 실행, 임시 구성의 근거를 설명한다. |
 
 [전체 도메인](../README.md)
