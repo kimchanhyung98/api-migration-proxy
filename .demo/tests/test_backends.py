@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import httpx
@@ -98,6 +99,29 @@ async def test_v2_slow_response_preserves_delay_and_body():
 def test_backend_factory_rejects_unknown_version():
     with pytest.raises(ValueError, match="version must be v1 or v2"):
         create_app("v3")
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+async def test_observation_counts_only_actual_item_requests(version):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(version)), base_url="http://synthetic.test"
+    ) as client:
+        before = await client.get("/__demo/requests")
+        assert before.status_code == 200
+        assert before.json() == {"version": version, "items": 0}
+        for path in ("/health", "/__demo/requests", "/not-a-route"):
+            await client.get(path)
+        await client.post("/items/same")
+        assert (await client.get("/__demo/requests")).json()["items"] == 0
+        responses = await asyncio.gather(
+            *(client.get(f"/items/{item}") for item in ("same", "different", "missing", "error"))
+        )
+        assert [response.status_code for response in responses] == [200, 200, 404, 500]
+        for _ in range(2):
+            assert (await client.get("/__demo/requests")).json() == {
+                "version": version,
+                "items": 4,
+            }
 
 
 @pytest.mark.parametrize("version,app", [("v1", v1_app), ("v2", v2_app)])

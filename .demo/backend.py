@@ -10,6 +10,7 @@ def create_app(version: str) -> FastAPI:
     if version not in {"v1", "v2"}:
         raise ValueError("version must be v1 or v2")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    item_requests = 0
 
     def success_response(result: dict, headers: dict | None = None) -> JSONResponse:
         body = (
@@ -39,8 +40,14 @@ def create_app(version: str) -> FastAPI:
     async def health():
         return success_response({"status": "alive"})
 
+    @app.get("/__demo/requests")
+    async def requests():
+        return {"version": version, "items": item_requests}
+
     @app.get("/items/{item_id}")
     async def item(item_id: str):
+        nonlocal item_requests
+        item_requests += 1
         headers = {"x-backend-version": version}
         if item_id == "error":
             return error_response(500, "SYNTHETIC_FAILURE", "synthetic failure", headers)
