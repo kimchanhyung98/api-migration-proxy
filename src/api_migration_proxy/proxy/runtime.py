@@ -5,7 +5,6 @@ import json
 import secrets
 import time
 import uuid
-from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,8 +47,11 @@ class _Input:
     def __init__(self, receive: Callable):
         self.receive = receive
         self.done = asyncio.Event()
+        self.complete = False
         self.disconnected = False
-        self.prefix: deque[bytes] = deque()
+        self.capture_limit: int | None = None
+        self.capture = bytearray()
+        self.oversized = False
 
     async def chunk(self) -> bytes:
         message = await self.receive()
@@ -57,26 +59,24 @@ class _Input:
             self.disconnected = True
             self.done.set()
             raise ClientDisconnected()
+        part = message.get("body", b"")
+        if self.capture_limit is not None and not self.oversized:
+            if len(self.capture) + len(part) > self.capture_limit:
+                self.capture.clear()
+                self.oversized = True
+            else:
+                self.capture.extend(part)
         if not message.get("more_body", False):
+            self.complete = True
             self.done.set()
-        return message.get("body", b"")
-
-    async def capture(self, limit: int) -> bytes | None:
-        size = 0
-        while not self.done.is_set():
-            part = await self.chunk()
-            if part:
-                self.prefix.append(part)
-            size += len(part)
-            if size > limit:
-                return None
-        return b"".join(self.prefix)
+        return part
 
     async def stream(self):
-        while self.prefix:
-            yield self.prefix.popleft()
-        while not self.done.is_set():
-            yield await self.chunk()
+        try:
+            while not self.done.is_set():
+                yield await self.chunk()
+        finally:
+            self.done.set()
 
 
 async def _body(data: bytes):
@@ -296,7 +296,9 @@ class ProxyRuntime:
             except TimeoutError:
                 self.collector.completeness_known = False
 
-    async def _attempt(self, attempt, snapshot, match, scope, body, selected, messages=None):
+    async def _attempt(
+        self, attempt, snapshot, match, scope, body, selected, messages=None, input_done=None
+    ):
         route_id = match.route.route_id if match else "unregistered"
         role = attempt.role
         budgets = snapshot.budgets
@@ -337,7 +339,8 @@ class ProxyRuntime:
                             (response.status_code, forwarding_headers(response.headers.raw)),
                         )
                     )
-                async for chunk in response.aiter_raw():
+                assert isinstance(response.stream, httpx.AsyncByteStream)
+                async for chunk in response.stream:
                     attempt.received += len(chunk)
                     if selected and attempt.capture_state == "complete":
                         if (
@@ -383,14 +386,24 @@ class ProxyRuntime:
         finally:
             try:
                 if response is not None:
-                    async with asyncio.timeout(max(0, timeout - (time.monotonic() - started))):
-                        await response.aclose()
+                    cleanup = asyncio.create_task(
+                        asyncio.wait_for(response.aclose(), budgets.shutdown_grace_seconds)
+                    )
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            attempt.outcome = attempt.reason = "cancelled"
+                            cancelled = True
+                    cleanup.result()
             except asyncio.CancelledError:
                 attempt.outcome = attempt.reason = "cancelled"
                 cancelled = True
             except Exception:
                 if attempt.outcome == "http_response":
                     attempt.outcome = attempt.reason = "transport_error"
+            if input_done is not None:
+                input_done.set()
             attempt.duration = time.monotonic() - started
             attempt.ended_at = _utc()
             if not attempt.complete and attempt.capture_state == "complete":
@@ -478,7 +491,14 @@ class ProxyRuntime:
         match = match_route(snapshot, scope["method"], scope["path"])
         route = match.route if match else None
         route_id = route.route_id if route else "unregistered"
-        identity = self.identity_provider(scope) if self.identity_provider else {}
+        identity_failed = False
+        try:
+            identity = self.identity_provider(scope) if self.identity_provider else {}
+        except Exception:
+            identity_failed = True
+        if identity_failed:
+            await self._reject(snapshot, scope, send)
+            return
         assignment = (
             choose_serving(route, trusted_identity=identity, request_key=request_id)
             if route
@@ -528,6 +548,23 @@ class ProxyRuntime:
                 if message["type"] == "http.disconnect":
                     return
 
+        async def dispatch_shadow():
+            await source.done.wait()
+            if source.oversized:
+                shadow.reason = "request_oversized"
+            elif not source.complete:
+                shadow.reason = "capture_unavailable"
+            else:
+                captured = bytes(source.capture)
+                source.capture.clear()
+                await self._attempt(shadow, snapshot, match, scope, _body(captured), True)
+
+        async def send_error_message(message):
+            nonlocal sent_headers
+            await send(message)
+            if message["type"] == "http.response.start":
+                sent_headers = True
+
         async def deliver():
             nonlocal sent_headers, sent_complete, user_outcome, response_source
             async with asyncio.timeout(snapshot.budgets.client_send_timeout_seconds):
@@ -547,7 +584,7 @@ class ProxyRuntime:
                     elif not sent_headers:
                         response_source = "proxy"
                         user_outcome = "timeout" if value == "timeout" else "transport_error"
-                        await self._error(send, 504 if value == "timeout" else 502)
+                        await self._error(send_error_message, 504 if value == "timeout" else 502)
                         sent_complete = True
                         return
                     else:
@@ -561,23 +598,21 @@ class ProxyRuntime:
                 else:
                     self._shadow_slots += 1
                     reserved = True
-                    async with asyncio.timeout(snapshot.budgets.serving_timeout_seconds):
-                        captured = await source.capture(
-                            snapshot.budgets.request_capture_limit_bytes
-                        )
-                    if captured is None:
-                        shadow.reason = "request_oversized"
-                    else:
-                        shadow_task = asyncio.create_task(
-                            self._attempt(shadow, snapshot, match, scope, _body(captured), True)
-                        )
-                if shadow_task is None:
-                    self.metrics.increment(
-                        "shadow_not_dispatched_total", route=route_id, reason=shadow.reason
-                    )
+                    source.capture_limit = snapshot.budgets.request_capture_limit_bytes
+                    shadow_task = asyncio.create_task(dispatch_shadow())
             producer = asyncio.create_task(
-                self._attempt(serving, snapshot, match, scope, source.stream(), selected, messages)
+                self._attempt(
+                    serving,
+                    snapshot,
+                    match,
+                    scope,
+                    source.stream(),
+                    selected,
+                    messages,
+                    source.done,
+                )
             )
+            producer.add_done_callback(lambda _: source.done.set())
             watcher = asyncio.create_task(watch_disconnect())
             sender = asyncio.create_task(deliver())
             done, _ = await asyncio.wait({sender, watcher}, return_when=asyncio.FIRST_COMPLETED)
@@ -585,24 +620,45 @@ class ProxyRuntime:
                 await sender
             elif not sent_complete:
                 raise ClientDisconnected()
-        except (ClientDisconnected, OSError, asyncio.CancelledError):
-            user_outcome = "cancelled"
-            if shadow_task:
-                shadow_task.cancel()
         except TimeoutError:
             user_outcome = "timeout"
             if not sent_headers:
                 response_source = "proxy"
-                await self._error(send, 504)
+                try:
+                    sender = asyncio.create_task(self._error(send_error_message, 504))
+                    if watcher is not None:
+                        done, _ = await asyncio.wait(
+                            {sender, watcher}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if sender not in done:
+                            raise ClientDisconnected()
+                    await sender
+                    sent_complete = True
+                except TimeoutError:
+                    raise IncompleteResponse("proxy error response deadline exceeded") from None
+                except (ClientDisconnected, OSError, asyncio.CancelledError):
+                    user_outcome = "cancelled"
+                    if shadow_task:
+                        shadow_task.cancel()
             else:
                 raise IncompleteResponse("client response deadline exceeded") from None
+        except (ClientDisconnected, OSError, asyncio.CancelledError):
+            user_outcome = "cancelled"
+            if shadow_task:
+                shadow_task.cancel()
         finally:
-            for child in (watcher, sender, producer):
-                if child and not child.done():
+            children = tuple(child for child in (watcher, sender, producer) if child)
+            for child in children:
+                if not child.done():
                     child.cancel()
-            await asyncio.gather(
-                *(child for child in (watcher, sender, producer) if child), return_exceptions=True
-            )
+            while any(not child.done() for child in children):
+                try:
+                    await asyncio.wait(children)
+                except asyncio.CancelledError:
+                    pass
+            for child in children:
+                if not child.cancelled():
+                    child.exception()
             self.metrics.increment(
                 "proxy_requests_total",
                 route=route_id,
@@ -661,6 +717,10 @@ class ProxyRuntime:
                             self.metrics.increment(
                                 "comparison_pipeline_total", route=route_id, step="terminal"
                             )
+                        else:
+                            self.metrics.increment(
+                                "shadow_not_dispatched_total", route=route_id, reason=shadow.reason
+                            )
                         attempts = {serving.backend: serving, shadow.backend: shadow}
                         summary["backends"] = {
                             key: value.summary() for key, value in attempts.items()
@@ -686,6 +746,7 @@ class ProxyRuntime:
                     except Exception:
                         self._drop("comparison_dropped")
                     finally:
+                        source.capture.clear()
                         if reserved:
                             self._shadow_slots -= 1
 

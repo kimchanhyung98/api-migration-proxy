@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import socket
 import threading
 import time
 from dataclasses import replace
@@ -7,13 +9,15 @@ from datetime import datetime
 
 import httpx
 import pytest
+import uvicorn
 
+from api_migration_proxy.app import create_app
 from api_migration_proxy.collection.collector import BatchResult
 from api_migration_proxy.collection.events import DetailPolicy
 from api_migration_proxy.collection.query import EventQuery, QueryAccess
 from api_migration_proxy.comparison.engine import compare
 from api_migration_proxy.proxy.runtime import IncompleteResponse
-from api_migration_proxy.routing.configuration import ConfigurationError, ShadowPolicy
+from api_migration_proxy.routing.configuration import Cohort, ConfigurationError, ShadowPolicy
 
 
 async def eventually(predicate):
@@ -24,6 +28,85 @@ async def eventually(predicate):
 
 def pipeline(harness, step):
     return harness.metrics.value("comparison_pipeline_total", route="catalog", step=step)
+
+
+async def test_identity_provider_failure_returns_private_503_without_backend_calls(
+    backend_factory, runtime_factory, caplog, monkeypatch
+):
+    marker = "SYNTHETIC_IDENTITY_SECRET_ONLY"
+
+    def identity_provider(scope):
+        credential = dict(scope["headers"])[b"authorization"].decode("ascii")
+        raise ValueError("identity verification failed: " + credential)
+
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(v1, v2, runtime_values={"identity_provider": identity_provider})
+    logger = logging.getLogger("uvicorn.error")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "propagate", True)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(harness.runtime),
+            host="127.0.0.1",
+            port=port,
+            access_log=False,
+            proxy_headers=False,
+            log_config=None,
+        )
+    )
+    task = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        await eventually(lambda: server.started)
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/catalog/1",
+                headers={"authorization": "Bearer " + marker},
+            )
+        assert (response.status_code, marker in caplog.text) == (503, False)
+        assert response.content == b'{"detail":"proxy request failed"}'
+        assert not v1.requests and not v2.requests
+        assert harness.runtime.observation_status()["active_requests"] == 0
+        assert (
+            harness.metrics.value(
+                "proxy_requests_total",
+                route="catalog",
+                serving="unknown",
+                outcome="rejected",
+                source="proxy",
+            )
+            == 1
+        )
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, 3)
+        listener.close()
+
+
+@pytest.mark.parametrize("identity", [None, {}, {"unrelated": "available"}])
+async def test_missing_identity_keeps_v1_serving_and_disables_shadow(
+    backend_factory, runtime_factory, asgi_request, identity
+):
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        route_values={
+            "cohort": Cohort("user", "catalog", "user_id", "test-salt"),
+            "v2_serve_ratio": 1,
+        },
+        runtime_values={"identity_provider": lambda _: identity},
+    )
+    exchange = await asgi_request(harness.runtime).wait()
+    await harness.runtime.flush()
+    assert exchange.status == 200
+    assert len(v1.requests) == 1
+    assert not v2.requests
+    assert pipeline(harness, "eligible") == 0
+    assert await harness.records() == []
 
 
 @pytest.mark.parametrize("status,body", [(200, b'{"ok":true}'), (404, b'{"missing":true}')])
@@ -704,7 +787,9 @@ async def test_t42_http_client_read_timeout_before_headers_maps_to_504_without_f
     v1, v2 = await backend_factory(), await backend_factory()
     harness = await runtime_factory(v1, v2)
 
-    async def read_timeout(*_):
+    async def read_timeout(_method, _url, _headers, body):
+        async for _ in body:
+            pass
         raise httpx.ReadTimeout("upstream read timeout")
 
     monkeypatch.setattr(harness.runtime._transports["serving"], "open", read_timeout)
@@ -716,6 +801,171 @@ async def test_t42_http_client_read_timeout_before_headers_maps_to_504_without_f
     assert record["backends"]["v2"]["execution_outcome"] == "http_response"
     assert record["serving_backend"] == "v1"
     assert record["response_source"] == "proxy"
+
+
+@pytest.mark.parametrize("phase", ["capture", "await_headers"])
+async def test_request_deadline_before_headers_returns_504(
+    backend_factory, runtime_factory, asgi_request, phase
+):
+    async def hung(_, writer):
+        await asyncio.Event().wait()
+
+    v1, v2 = await backend_factory(hung), await backend_factory()
+    route_values = {"method": "POST"}
+    if phase == "await_headers":
+        route_values["shadow"] = ShadowPolicy(False, 0)
+    harness = await runtime_factory(
+        v1,
+        v2,
+        route_values=route_values,
+        budget_values={
+            "serving_timeout_seconds": 0.03 if phase == "capture" else 1,
+            "client_send_timeout_seconds": 0.03,
+        },
+    )
+    exchange = await asgi_request(
+        harness.runtime,
+        method="POST",
+        headers=((b"content-length", b"1"),),
+        chunks=() if phase == "capture" else (b"x",),
+    ).wait()
+    await harness.runtime.flush()
+    assert [message["status"] for message in exchange.messages if "status" in message] == [504]
+    assert exchange.messages[-1]["more_body"] is False
+    assert (
+        harness.metrics.value(
+            "proxy_requests_total",
+            route="catalog",
+            serving="v1",
+            outcome="timeout",
+            source="proxy",
+        )
+        == 1
+    )
+    assert len(v1.requests) == int(phase == "await_headers")
+    assert not v2.requests
+
+
+@pytest.mark.parametrize(
+    "response,status", [("backend", 200), ("proxy_backend_error", 502), ("proxy_deadline", 504)]
+)
+async def test_response_body_deadline_preserves_started_response(
+    backend_factory, runtime_factory, asgi_request, respond, response, status
+):
+    async def backend(_, writer):
+        if response == "proxy_backend_error":
+            writer.close()
+        elif response == "proxy_deadline":
+            await asyncio.Event().wait()
+        else:
+            await respond(writer)
+
+    v1, v2 = await backend_factory(backend), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={"client_send_timeout_seconds": 0.03},
+        route_values={"shadow": ShadowPolicy(False, 0)},
+    )
+    body_attempts = 0
+
+    async def slow_send(message):
+        nonlocal body_attempts
+        if message["type"] == "http.response.body":
+            body_attempts += 1
+            if body_attempts == 1:
+                await asyncio.Event().wait()
+
+    exchange = asgi_request(harness.runtime, on_send=slow_send)
+    with pytest.raises(IncompleteResponse):
+        await exchange.wait()
+    assert [message["status"] for message in exchange.messages if "status" in message] == [status]
+    assert body_attempts == 1
+    assert not any(message["type"] == "http.response.body" for message in exchange.messages)
+    assert (
+        harness.metrics.value(
+            "proxy_requests_total",
+            route="catalog",
+            serving="v1",
+            outcome="timeout",
+            source="backend" if response == "backend" else "proxy",
+        )
+        == 1
+    )
+    assert len(v1.requests) == 1
+    assert not v2.requests
+
+
+@pytest.mark.parametrize("error", [OSError, asyncio.CancelledError])
+@pytest.mark.parametrize("message_type", ["http.response.start", "http.response.body"])
+async def test_client_cancellation_during_deadline_response_cancels_shadow(
+    backend_factory, runtime_factory, asgi_request, error, message_type
+):
+    async def hung(_, writer):
+        await asyncio.Event().wait()
+
+    v1, v2 = await backend_factory(hung), await backend_factory(hung)
+    harness = await runtime_factory(v1, v2, budget_values={"client_send_timeout_seconds": 0.03})
+
+    async def disconnected_send(message):
+        if message["type"] == message_type:
+            raise error("synthetic client cancellation")
+
+    await asgi_request(harness.runtime, on_send=disconnected_send).wait()
+    await harness.runtime.flush()
+    assert (
+        harness.metrics.value(
+            "proxy_requests_total",
+            route="catalog",
+            serving="v1",
+            outcome="cancelled",
+            source="proxy",
+        )
+        == 1
+    )
+    record = (await harness.records())[0]
+    assert record["request_outcome"] == "cancelled"
+    assert record["backends"]["v2"]["execution_outcome"] == "cancelled"
+    assert harness.metrics.value("backend_inflight", backend="v2", role="shadow") == 0
+
+
+async def test_receive_disconnect_during_deadline_response_cancels_shadow(
+    backend_factory, runtime_factory, asgi_request
+):
+    async def hung(_, writer):
+        await asyncio.Event().wait()
+
+    v1, v2 = await backend_factory(hung), await backend_factory(hung)
+    harness = await runtime_factory(v1, v2, budget_values={"client_send_timeout_seconds": 0.03})
+    sending_body = asyncio.Event()
+
+    async def slow_send(message):
+        if message["type"] == "http.response.body":
+            sending_body.set()
+            await asyncio.Event().wait()
+
+    exchange = asgi_request(harness.runtime, on_send=slow_send)
+    async with asyncio.timeout(1):
+        await sending_body.wait()
+    exchange.disconnect()
+    await exchange.wait()
+    await harness.runtime.flush()
+    assert [message["status"] for message in exchange.messages if "status" in message] == [504]
+    assert not any(message["type"] == "http.response.body" for message in exchange.messages)
+    assert (
+        harness.metrics.value(
+            "proxy_requests_total",
+            route="catalog",
+            serving="v1",
+            outcome="cancelled",
+            source="proxy",
+        )
+        == 1
+    )
+    record = (await harness.records())[0]
+    assert record["request_outcome"] == "cancelled"
+    assert record["backends"]["v2"]["execution_outcome"] == "cancelled"
+    assert harness.metrics.value("backend_inflight", backend="v2", role="shadow") == 0
 
 
 async def test_t23_comparison_byte_budget_drop_does_not_delay_or_change_serving(
@@ -1114,7 +1364,9 @@ async def test_response_cleanup_failure_preserves_terminal_accounting(
     v1, v2 = await backend_factory(), await backend_factory()
     harness = await runtime_factory(v1, v2)
 
-    async def open_response(*_):
+    async def open_response(_method, _url, _headers, body):
+        async for _ in body:
+            pass
         return httpx.Response(200, stream=BrokenStream())
 
     monkeypatch.setattr(harness.runtime._transports[role], "open", open_response)
@@ -1151,3 +1403,161 @@ async def test_business_classifier_cannot_mark_server_error_successful(
     record = (await harness.records())[0]
     assert record["comparison"]["result"] == "execution_error"
     assert all(b["contract_class"] == "unexpected_error" for b in record["backends"].values())
+
+
+async def test_slow_client_timeout_releases_backend_connection_for_next_requests(
+    backend_factory, runtime_factory, asgi_request, respond
+):
+    async def backend(request, writer):
+        if request.target != b"/catalog/slow":
+            await respond(writer)
+            return
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n")
+        await writer.drain()
+        for _ in range(10):
+            writer.write(b"x" * 10000)
+            await writer.drain()
+            await asyncio.sleep(0.001)
+
+    v1, v2 = await backend_factory(backend), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={
+            "serving_max_inflight": 1,
+            "serving_timeout_seconds": 0.05,
+            "client_send_timeout_seconds": 1,
+        },
+        route_values={"shadow": ShadowPolicy(False, 0)},
+    )
+    assert (await asgi_request(harness.runtime).wait()).status == 200
+
+    async def slow_send(message):
+        if message["type"] == "http.response.body":
+            await asyncio.sleep(0.15)
+
+    slow = asgi_request(harness.runtime, path=b"/catalog/slow", on_send=slow_send)
+    with pytest.raises(IncompleteResponse):
+        await slow.wait()
+    async with httpx.AsyncClient(trust_env=False) as client:
+        direct = await client.get(v1.url + "/catalog/direct-health")
+    assert direct.status_code == 200
+    for _ in range(2):
+        following = await asgi_request(harness.runtime).wait()
+        assert following.status == 200
+        assert following.body == b'{"ok":true}'
+    assert harness.runtime.observation_status()["active_requests"] == 0
+    assert harness.metrics.value("backend_inflight", backend="v1", role="serving") == 0
+
+
+@pytest.mark.parametrize("interrupt", ["disconnect", "cleanup_timeout"])
+async def test_response_cleanup_is_bounded_and_survives_request_cancellation(
+    backend_factory, runtime_factory, asgi_request, respond, monkeypatch, interrupt
+):
+    async def backend(request, writer):
+        if request.target == b"/catalog/incomplete":
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\npartial")
+            await writer.drain()
+        else:
+            await respond(writer)
+
+    v1, v2 = await backend_factory(backend), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={"serving_max_inflight": 1, "shutdown_grace_seconds": 0.05},
+        route_values={"shadow": ShadowPolicy(False, 0)},
+    )
+    transport = harness.runtime._transports["serving"]
+    actual_open = transport.open
+    closing, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    interrupted = False
+
+    async def open_response(*args):
+        response = await actual_open(*args)
+        if response.request.url.path != "/catalog/incomplete":
+            return response
+        actual_close = response.aclose
+
+        async def delayed_close():
+            nonlocal interrupted
+            closing.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted = True
+                raise
+            finally:
+                await actual_close()
+                closed.set()
+
+        monkeypatch.setattr(response, "aclose", delayed_close)
+        return response
+
+    monkeypatch.setattr(transport, "open", open_response)
+    exchange = asgi_request(harness.runtime, path=b"/catalog/incomplete")
+    await closing.wait()
+    if interrupt == "disconnect":
+        exchange.disconnect()
+        await asyncio.sleep(0.01)
+        release.set()
+    async with asyncio.timeout(0.3):
+        if interrupt == "cleanup_timeout":
+            with pytest.raises(IncompleteResponse):
+                await exchange.wait()
+        else:
+            await exchange.wait()
+        await closed.wait()
+    assert interrupted == (interrupt == "cleanup_timeout")
+    following = await asgi_request(harness.runtime).wait()
+    assert following.status == 200
+    assert following.body == b'{"ok":true}'
+    assert harness.runtime.observation_status()["active_requests"] == 0
+    assert harness.metrics.value("backend_inflight", backend="v1", role="serving") == 0
+
+
+@pytest.mark.parametrize("interrupt", ["deadline", "disconnect"])
+async def test_completed_body_cleanup_survives_request_deadline_and_disconnect(
+    backend_factory, runtime_factory, asgi_request, monkeypatch, interrupt
+):
+    v1, v2 = await backend_factory(), await backend_factory()
+    harness = await runtime_factory(
+        v1,
+        v2,
+        budget_values={"serving_max_inflight": 1, "serving_timeout_seconds": 0.05},
+        route_values={"shadow": ShadowPolicy(False, 0)},
+    )
+    transport = harness.runtime._transports["serving"]
+    actual_open = transport.open
+    closing = asyncio.Event()
+
+    async def open_response(*args):
+        response = await actual_open(*args)
+        if response.request.url.path == "/catalog/slow-close":
+            actual_close = response.stream.aclose
+
+            async def delayed_close():
+                closing.set()
+                await asyncio.sleep(0.1)
+                await actual_close()
+
+            monkeypatch.setattr(response.stream, "aclose", delayed_close)
+        return response
+
+    monkeypatch.setattr(transport, "open", open_response)
+    exchange = asgi_request(harness.runtime, path=b"/catalog/slow-close")
+    await closing.wait()
+    if interrupt == "disconnect":
+        exchange.disconnect()
+    try:
+        await exchange.wait()
+    except IncompleteResponse:
+        pass
+    async with httpx.AsyncClient(trust_env=False) as client:
+        direct = await client.get(v1.url + "/catalog/direct-health")
+    assert direct.status_code == 200
+    following = await asgi_request(harness.runtime).wait()
+    assert following.status == 200
+    assert following.body == b'{"ok":true}'
+    assert harness.runtime.observation_status()["active_requests"] == 0
+    assert harness.metrics.value("backend_inflight", backend="v1", role="serving") == 0

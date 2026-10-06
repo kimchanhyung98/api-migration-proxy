@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from api_migration_proxy.proxy._duplex import DuplexHTTPTransport
+
 _HOP_BY_HOP = frozenset(
     {
         b"connection",
@@ -97,15 +99,7 @@ class BackendTransport:
         ):
             logging.getLogger(name).addFilter(_TRANSPORT_LOG_FILTER)
         self._timeout = httpx.Timeout(timeout_seconds).as_dict()
-        self._transport = httpx.AsyncHTTPTransport(
-            verify=True,
-            trust_env=False,
-            retries=0,
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_connections,
-            ),
-        )
+        self._transport = DuplexHTTPTransport(max_connections)
 
     async def open(
         self,
