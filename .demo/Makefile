@@ -32,7 +32,7 @@ down: ## 데모 컨테이너 중지·제거 (이벤트 볼륨 유지)
 	$(COMPOSE) down
 
 reload: ## 설정 검사 후 Proxy만 재생성
-	$(COMPOSE) run --rm --no-deps proxy check-config --config /config/proxy.json
+	$(COMPOSE) run --rm --no-deps proxy check-config
 	$(COMPOSE) up -d --wait --no-deps --force-recreate proxy
 
 docker-test: ## 별도 데모 이미지에서 데모 검사 실행

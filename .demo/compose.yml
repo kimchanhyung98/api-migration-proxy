@@ -30,7 +30,22 @@ services:
       context: ..
       target: runtime
     init: true
-    command: ["serve", "--config", "/config/proxy.json", "--host", "0.0.0.0", "--port", "8080", "--event-store", "/data/events.sqlite"]
+    command: ["serve"]
+    environment:
+      API_PROXY_CONFIG: ${PROXY_CONFIG:+/config/proxy.json}
+      API_PROXY_HOST: 0.0.0.0
+      API_PROXY_PORT: "8080"
+      API_PROXY_EVENT_STORE: /data/events.sqlite
+      API_PROXY_V1_URL: http://v1:8000
+      API_PROXY_V2_URL: http://v2:8000
+      API_PROXY_ROUTE_PATH: /items/{id}
+      API_PROXY_V2_RATIO: ${DEMO_V2_RATIO:-0}
+      API_PROXY_SHADOW_ENABLED: ${DEMO_SHADOW_ENABLED:-false}
+      API_PROXY_SHADOW_REVIEW_REF: synthetic-read-only-fixture
+      API_PROXY_CONTROL_ENABLED: "true"
+      API_PROXY_CONTROL_HOST: 127.0.0.1
+      API_PROXY_CONTROL_PORT: "9090"
+      API_PROXY_CONTROL_TOKEN: ${DEMO_CONTROL_TOKEN:-local-demo-only}
     ports:
       - "127.0.0.1:${PROXY_PORT:-8080}:8080"
     volumes:
@@ -43,7 +58,7 @@ services:
         condition: service_healthy
     stop_grace_period: 15s
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:9090/healthcheck', headers={'Authorization': 'Bearer ' + os.environ['API_PROXY_CONTROL_TOKEN']}); urllib.request.urlopen(request, timeout=2).close()"]
       interval: 2s
       timeout: 3s
       retries: 15

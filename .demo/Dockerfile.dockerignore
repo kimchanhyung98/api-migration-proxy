@@ -14,3 +14,4 @@
 .demo/.ruff_cache/
 .demo/.mypy_cache/
 .demo/.pytest_cache/
+.demo/.env*

@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 import socket
 import sqlite3
@@ -26,8 +27,6 @@ from api_migration_proxy.proxy.runtime import ProxyRuntime
 from api_migration_proxy.routing.configuration import ConfigManager
 from api_migration_proxy.settings import load_settings, metrics_from_settings
 
-from tests.smoke import check
-
 ROOT = Path(__file__).parents[1]
 
 
@@ -42,6 +41,14 @@ def local_process():
         process = subprocess.Popen(
             [sys.executable, *arguments, "--port", str(port)],
             cwd=ROOT,
+            env={
+                **{
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("API_PROXY_")
+                },
+                "API_PROXY_CONTROL_ENABLED": "false",
+            },
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
@@ -80,8 +87,8 @@ def demo_backends(local_process):
 
 
 @pytest.mark.parametrize("serving", ["v1", "v2"])
-def test_local_cli_smoke_with_real_backends_and_persistent_events(
-    local_process, demo_backends, tmp_path, capsys, serving
+def test_local_cli_preserves_backend_http_responses(
+    local_process, demo_backends, tmp_path, serving
 ):
     v1, v2 = demo_backends
     data = json.loads((ROOT / "config/docker.json").read_text())
@@ -101,30 +108,90 @@ def test_local_cli_smoke_with_real_backends_and_persistent_events(
             str(database),
         ]
     )
-    check(proxy.url, str(database), serving)
-    assert "PASS:" in capsys.readouterr().out
-    proxy.process.send_signal(signal.SIGTERM)
-    assert proxy.process.wait(timeout=10) in (0, -signal.SIGTERM)
-    assert b"Application shutdown complete." in proxy.process.stderr.read()
-    with closing(sqlite3.connect(database)) as db:
-        before = dict(db.execute("SELECT event_id, summary FROM comparison_event"))
-    assert len(before) == 3
-    restarted = local_process(
-        [
-            "-m",
-            "api_migration_proxy.cli",
-            "serve",
-            "--config",
-            str(config),
-            "--event-store",
-            str(database),
-        ]
-    )
-    check(restarted.url, str(database), serving)
-    with closing(sqlite3.connect(database)) as db:
-        after = dict(db.execute("SELECT event_id, summary FROM comparison_event"))
-    assert before.items() <= after.items()
-    assert len(after) == len(before) + 3
+    with httpx.Client(base_url=proxy.url, timeout=5, trust_env=False) as client:
+        for item, status, body in (
+            (
+                "sample",
+                200,
+                {"id": "sample", "name": "Synthetic item"}
+                if serving == "v1"
+                else {
+                    "code": "0000",
+                    "message": "Success",
+                    "result": {"id": "sample", "name": "Synthetic item"},
+                },
+            ),
+            (
+                "missing",
+                404,
+                {"result": []}
+                if serving == "v1"
+                else {"code": "NOT_FOUND", "message": "Not found.", "result": []},
+            ),
+            (
+                "error",
+                500,
+                {"result": []}
+                if serving == "v1"
+                else {"code": "SYNTHETIC_FAILURE", "message": "synthetic failure", "result": []},
+            ),
+        ):
+            response = client.get(f"/items/{item}")
+            assert response.status_code == status
+            assert response.json() == body
+            assert response.headers["x-backend-version"] == serving
+            assert response.headers["content-type"] == "application/json"
+
+
+@pytest.mark.parametrize("serving", ["v1", "v2"])
+def test_local_cli_preserves_sqlite_events_across_restart(
+    local_process, demo_backends, tmp_path, serving
+):
+    v1, v2 = demo_backends
+    data = json.loads((ROOT / "config/docker.json").read_text())
+    snapshot = data["snapshot"]
+    snapshot.update(default_v1=v1.url, allowed_backends=[v1.url, v2.url])
+    snapshot["routes"][0].update(v1=v1.url, v2=v2.url, v2_serve_ratio=int(serving == "v2"))
+    config, database = tmp_path / "config.json", tmp_path / "events.sqlite"
+    config.write_text(json.dumps(data))
+    before = {}
+    for expected_count in (1, 2):
+        proxy = local_process(
+            [
+                "-m",
+                "api_migration_proxy.cli",
+                "serve",
+                "--config",
+                str(config),
+                "--event-store",
+                str(database),
+            ]
+        )
+        with httpx.Client(base_url=proxy.url, timeout=5, trust_env=False) as client:
+            assert client.get("/items/persistent").status_code == 200
+        proxy.process.send_signal(signal.SIGTERM)
+        assert proxy.process.wait(timeout=10) in (0, -signal.SIGTERM)
+        assert b"Application shutdown complete." in proxy.process.stderr.read()
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            after = dict(db.execute("SELECT event_id, summary FROM comparison_event"))
+        assert len(after) == expected_count
+        assert before.items() <= after.items()
+        shadow = "v2" if serving == "v1" else "v1"
+        for raw_summary in after.values():
+            summary = json.loads(raw_summary)
+            assert summary["route_id"] == "synthetic_item"
+            assert summary["configuration_revision"] == snapshot["revision"]
+            assert summary["serving_backend"] == serving
+            assert summary["shadow_dispatched"] is True
+            assert summary["request_outcome"] == "completed"
+            assert summary["backends"][serving]["role"] == "serving"
+            assert summary["backends"][shadow]["role"] == "shadow"
+            assert summary["backends"][serving]["status_code"] == 200
+            assert summary["backends"][shadow]["status_code"] == 200
+            assert summary["comparison"]["result"] == "not_comparable"
+            assert summary["comparison"]["reason"] == "authorization_context_unknown"
+            assert summary["detail_state"] == "disabled"
+        before = after
 
 
 @pytest.mark.parametrize("serving", ["v1", "v2"])
