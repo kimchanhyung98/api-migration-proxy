@@ -136,6 +136,24 @@ def test_mapping_cannot_drop_or_invent_parameters(route):
         replace(route, v2_path_template="/api/all")
 
 
+@pytest.mark.parametrize("field", ["v1_path_template", "v2_path_template"])
+@pytest.mark.parametrize("template", ["/새경로/{id}", "/api/\x7f/{id}"])
+def test_destination_mapping_rejects_non_uri_characters(route, field, template):
+    with pytest.raises(ConfigurationError, match="ASCII URI"):
+        replace(route, **{field: template})
+
+
+@pytest.mark.parametrize("backend, port", [("v1", 8101), ("v2", 8102)])
+def test_destination_mapping_preserves_percent_encoded_segments(snapshot, route, backend, port):
+    mapped = replace(route, **{f"{backend}_path_template": "/%EC%83%88/{id}"})
+    configured = replace(snapshot, routes=(mapped,))
+    match = match_route(configured, "GET", "/catalog/one two")
+    assert (
+        backend_url(configured, match, backend, b"/catalog/one%20two")
+        == f"http://localhost:{port}/%EC%83%88/one%20two"
+    )
+
+
 @pytest.mark.parametrize("template", ["/catalog/{item}", "/catalog/search"])
 def test_ambiguous_templates_rejected(snapshot, route, template):
     other = replace(route, route_id="other", path_template=template)
@@ -147,6 +165,26 @@ def test_disjoint_methods_and_templates_allowed(snapshot, route):
     post = replace(route, route_id="post-search", method="POST", path_template="/catalog/search")
     listing = replace(route, route_id="catalog_list", path_template="/catalog")
     assert len(replace(snapshot, routes=(route, post, listing)).routes) == 3
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "parameter_template, empty_template, request_path",
+    [
+        ("/catalog/{id}", "/catalog/", "/catalog/item-1"),
+        ("/catalog/{id}/detail", "/catalog//detail", "/catalog/item-1/detail"),
+    ],
+)
+def test_parameter_and_empty_segment_routes_are_disjoint(
+    snapshot, route, reverse, parameter_template, empty_template, request_path
+):
+    parameter = replace(route, path_template=parameter_template)
+    empty = replace(route, route_id="empty-segment", path_template=empty_template)
+    routes = (empty, parameter) if reverse else (parameter, empty)
+    configured = replace(snapshot, routes=routes)
+
+    assert match_route(configured, "GET", empty_template).route is empty
+    assert match_route(configured, "GET", request_path).route is parameter
 
 
 @pytest.mark.parametrize(
@@ -161,11 +199,38 @@ def test_disjoint_methods_and_templates_allowed(snapshot, route):
         "https://example.invalid\n",
         "https://example.invalid:99999",
         "https://example.invalid%2f.other",
+        "https://[v1.example]",
+        "https://[v1.example:future]",
+        "https://example.invalid^",
+        "https://example.invalid<",
+        "https://example.invalid>",
+        'https://example.invalid"',
+        "https://example.invalid{",
+        "https://example.invalid}",
+        "https://example.invalid|",
+        "https://example.invalid`",
     ],
 )
 def test_invalid_backend_rejected(route, backend):
     with pytest.raises(ConfigurationError):
         replace(route, v2=backend)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "https://example.invalid",
+        "http://backend-v2:8102/",
+        "http://backend_v2:8102",
+        "HTTP://EXAMPLE.invalid:8080",
+        "http://127.0.0.1:8102",
+        "https://[::1]:443/",
+        "https://[2001:db8:0:0:0:0:0:1]:8443",
+        "http://[::ffff:192.0.2.1]:8102",
+    ],
+)
+def test_supported_backend_origins_keep_their_destination(route, backend):
+    assert replace(route, v2=backend).v2 == backend.rstrip("/")
 
 
 def test_fixed_operator_allowlist_required(snapshot, route):
@@ -191,6 +256,20 @@ def test_limits_and_eligibility_review_are_required(snapshot, route):
         ShadowPolicy(True, 0)
     with pytest.raises(ConfigurationError):
         replace(route, comparison_policy_revision=None)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "serving_timeout_seconds",
+        "shadow_timeout_seconds",
+        "client_send_timeout_seconds",
+        "shutdown_grace_seconds",
+    ],
+)
+def test_runtime_budgets_reject_seconds_outside_timer_range(snapshot, field):
+    with pytest.raises(ConfigurationError):
+        replace(snapshot.budgets, **{field: 10**1000})
 
 
 def test_group_policy_mismatch_rejected(snapshot, route):
@@ -230,6 +309,23 @@ def test_hash_serialization_has_unambiguous_boundaries(route):
         replace(route.cohort, algorithm="python-hash")
 
 
+@pytest.mark.parametrize("field", ["group", "salt"])
+def test_configuration_rejects_unencodable_cohort_hash_inputs(snapshot, field):
+    value = asdict(snapshot)
+    value["routes"][0]["cohort"][field] = "\ud800"
+    with pytest.raises(ConfigurationError):
+        snapshot_from_dict(value)
+
+
+def test_unicode_cohort_inputs_preserve_stable_assignment(route):
+    route = replace(route, cohort=replace(route.cohort, group="카탈로그", salt="시험-salt"))
+    identity = {"authenticated_user": "사용자-1"}
+    first = choose_serving(route, trusted_identity=identity)
+    assert first == choose_serving(route, trusted_identity=identity)
+    assert first.reason == "cohort"
+    assert 0 <= first.bucket < 1
+
+
 def test_serving_boundaries_and_missing_trusted_keys(route):
     identity = {"authenticated_user": "user-1"}
     assert (
@@ -253,6 +349,27 @@ def test_serving_boundaries_and_missing_trusted_keys(route):
     )
     assert choose_serving(request_route, request_key="independent-request").backend == "v2"
     assert choose_serving(request_route).reason == "missing_cohort_key"
+
+
+@pytest.mark.parametrize("mode", ["user", "request"])
+def test_unencodable_cohort_key_uses_missing_key_fallback(route, mode):
+    route = replace(
+        route,
+        v2_serve_ratio=1,
+        cohort=replace(
+            route.cohort,
+            mode=mode,
+            key_source="request" if mode == "request" else "authenticated_user",
+        ),
+    )
+    assignment = choose_serving(
+        route, trusted_identity={"authenticated_user": "\ud800"}, request_key="\ud800"
+    )
+    assert (assignment.backend, assignment.reason, assignment.bucket) == (
+        "v1",
+        "missing_cohort_key",
+        None,
+    )
 
 
 def test_snapshot_and_nested_values_are_immutable(snapshot, route):

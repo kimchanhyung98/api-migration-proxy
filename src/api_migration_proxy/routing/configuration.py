@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from ipaddress import IPv6Address
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
@@ -38,23 +39,31 @@ def _ratio(value: object, name: str) -> None:
 
 
 def _positive(value: object, name: str, *, integer: bool = False) -> None:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int if integer else (int, float))
-        or (isinstance(value, float) and not math.isfinite(value))
-        or value <= 0
-    ):
+    try:
+        valid = (
+            not isinstance(value, bool)
+            and isinstance(value, int if integer else (int, float))
+            and value > 0
+            and (integer or math.isfinite(value))
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
         raise ConfigurationError(f"{name} must be a positive {'integer' if integer else 'number'}")
 
 
 def backend_origin(value: str) -> str:
     _text(value, "backend")
-    if any(ord(char) < 33 or ord(char) > 126 for char in value) or "\\" in value:
+    if any(ord(char) < 33 or ord(char) > 126 for char in value) or any(
+        char in value for char in '\\<>"{}|^`'
+    ):
         raise ConfigurationError("backend must be an ASCII HTTP origin")
     try:
         parsed = urlsplit(value)
         port = parsed.port
         hostname = parsed.hostname
+        if hostname and parsed.netloc.startswith("["):
+            IPv6Address(hostname)
     except ValueError as exc:
         raise ConfigurationError("invalid backend origin") from exc
     if (
@@ -134,6 +143,11 @@ class Cohort:
             raise ConfigurationError("unsupported cohort mode")
         for name in ("group", "key_source", "salt"):
             _text(getattr(self, name), name)
+        try:
+            self.group.encode("utf-8")
+            self.salt.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ConfigurationError("cohort hash inputs must be valid UTF-8") from None
         if self.mode == "request" and self.key_source != "request":
             raise ConfigurationError("request cohort must use an independent request key")
         if self.mode != "request" and self.key_source == "request":
@@ -241,6 +255,10 @@ class Route:
                 mapped_names = {
                     part for part in template_parts(mapped) if _PARAMETER.fullmatch(part)
                 }
+                if not mapped.isascii() or "\x7f" in mapped:
+                    raise ConfigurationError(
+                        "destination path mapping must use ASCII URI characters"
+                    )
                 if mapped_names != names:
                     raise ConfigurationError("path mapping must preserve all registered parameters")
         object.__setattr__(self, "v1", backend_origin(self.v1))
@@ -299,7 +317,7 @@ class Snapshot:
                 if route.method != other.method or len(parts) != len(other_parts):
                     continue
                 if all(
-                    a == b or _PARAMETER.fullmatch(a) or _PARAMETER.fullmatch(b)
+                    a == b or (b and _PARAMETER.fullmatch(a)) or (a and _PARAMETER.fullmatch(b))
                     for a, b in zip(parts, other_parts)
                 ):
                     raise ConfigurationError("ambiguous route templates")

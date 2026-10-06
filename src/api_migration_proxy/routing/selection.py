@@ -67,7 +67,10 @@ def choose_serving(
     )
     if not isinstance(key, str) or not key:
         return Assignment("v1", "missing_cohort_key", None)
-    bucket = cohort_bucket(cohort, key)
+    try:
+        bucket = cohort_bucket(cohort, key)
+    except UnicodeEncodeError:
+        return Assignment("v1", "missing_cohort_key", None)
     return Assignment("v2" if bucket < route.v2_serve_ratio else "v1", "cohort", bucket)
 
 
