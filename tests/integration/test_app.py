@@ -493,3 +493,53 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(tmp_path, policy
         backend.shutdown()
         backend.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "absolute,body_value,expected",
+    [
+        ("0.099999999999999999999", "0.1", "different"),
+        ('"0.099999999999999999999"', "0.1", "different"),
+        ("0.100000000000000000001", "0.100000000000000000001", "matched"),
+        ('"0.100000000000000000001"', "0.100000000000000000001", "matched"),
+        ("0.1", "0.1", "matched"),
+        ("1", "1", "matched"),
+    ],
+)
+def test_json_tolerance_preserves_exact_comparison_boundary(
+    tmp_path, absolute, body_value, expected
+):
+    from api_migration_proxy.comparison.engine import BackendResponse, ComparisonContext, compare
+    from api_migration_proxy.settings import load_settings
+
+    data = example_settings()
+    data["comparison_policies"][0]["tolerances"] = [
+        {"path": "/id", "absolute": "TOLERANCE_LITERAL"}
+    ]
+    data["snapshot"]["budgets"]["serving_timeout_seconds"] = 0.25
+    data["snapshot"]["routes"][0]["v2_serve_ratio"] = 0.5
+    data["work_limits"]["compare_timeout_seconds"] = 0.25
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(data).replace('"TOLERANCE_LITERAL"', absolute))
+
+    settings = load_settings(path)
+    policy = next(iter(settings.comparison_policies.values()))
+    result = compare(
+        BackendResponse("v1", "serving", "http_response", "success", 200, body=b'{"id":0}'),
+        BackendResponse(
+            "v2",
+            "shadow",
+            "http_response",
+            "success",
+            200,
+            body=f'{{"id":{body_value}}}'.encode(),
+        ),
+        policy,
+        ComparisonContext(True, True, True),
+    )
+
+    assert result.result == expected
+    assert type(settings.snapshot.budgets.serving_timeout_seconds) is float
+    assert type(settings.snapshot.routes[0].v2_serve_ratio) is float
+    assert type(settings.work_limits.compare_timeout_seconds) is float
+    assert type(settings.collection_limits.retry_delay_seconds) is float

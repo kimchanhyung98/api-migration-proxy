@@ -443,9 +443,17 @@ def _walk(left: Any, right: Any, differences: _Differences, applied: set[str] | 
 
 def _mapping_parent(value: Any, parts: tuple[str, ...]) -> dict[str, Any] | None:
     for part in parts[:-1]:
-        if not isinstance(value, dict) or part not in value:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and re.fullmatch(r"0|[1-9][0-9]*", part):
+            if len(part) > len(str(len(value))):
+                return None
+            index = int(part)
+            if index >= len(value):
+                return None
+            value = value[index]
+        else:
             return None
-        value = value[part]
     return value if isinstance(value, dict) else None
 
 

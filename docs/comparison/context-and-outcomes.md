@@ -1,104 +1,102 @@
 # 비교 문맥과 결과 판정
 
-- 양쪽 실행의 비교 가능 조건 확인
-- 실행 오류·계약 차이·비교 한계 구분
+비교기는 v1과 v2의 실행 결과를 받아 비교 가능 여부를 먼저 판정한다. 실행 실패, 확인된 계약 차이, 정보 부족으로 인한 판정 불가를 서로 다른 결과로 남긴다. Serving과 shadow는 backend 버전과 별개의 [역할](../_rules/glossary.md)이다.
 
 ## 기능 계약
 
 | 항목 | 정의 |
 | --- | --- |
-| 시작 조건·입력 | 양쪽 backend 결과, 성공·예상 거절·업무 오류 계약, 권한·데이터 문맥 |
-| 결과·출력 | result·reason·contract class와 제한된 차이 정보 |
-| 실패·제한 | 예상 밖 API 오류·정보 부족의 정상 일치 처리 금지, 동일 응답만으로 권한의 절대적 정확성 증명 불가 |
+| 시작 조건·입력 | 양쪽 backend의 실행 결과, route에 등록된 성공·예상 거절·업무 오류 계약, 논리 입력·권한·데이터 문맥을 사용한다. |
+| 결과·출력 | 최종 `result` 하나와 주된 `reason`, `comparison_class`, 제한된 차이 정보를 반환한다. 각 backend의 `contract_class`는 별도로 유지한다. |
+| 실패·제한 | 예상 밖 API 오류나 정보 부족을 정상 일치로 처리해서는 안 된다. 동일한 응답만으로 권한 판정 자체가 올바르다고 증명할 수 없다. |
 
 ## 비교의 목적과 한계
 
-- 비교 목적: 같은 논리 입력에 대한 v1/v2의 등록 API 계약 충족 여부 조사
-- 증명 범위: 관측된 요청과 등록 비교 정책으로 한정
-- 동일 응답만으로 전체 데이터 정합성·권한 정확성·사용자 행동 개선·운영 가용성 보장 불가
-- 비교 정책과 저장 정책의 분리: 개인정보 저장 제외를 업무 필드 비교 제외로 자동 적용 금지
-- 민감 필드: 허용 범위의 메모리 비교와 값 저장 금지 계약을 별도 정의
+비교의 목적은 같은 논리 입력에 대해 v1과 v2가 등록된 API 계약을 충족하는지 조사하는 것이다. 판정의 유효 범위는 실제 관측된 요청, 확인된 비교 문맥 및 적용한 비교 정책으로 한정한다. 두 응답이 같다는 사실만으로 전체 데이터 정합성, 권한 정확성, 사용자 행동 개선 또는 운영 가용성을 보장해서는 안 된다.
+
+비교 정책과 저장 정책은 별도로 정의해야 한다. 개인정보를 저장 대상에서 제외했다는 이유만으로 해당 업무 필드를 메모리 비교에서도 자동 제외해서는 안 된다. 민감 필드는 비교를 위해 메모리에서 취급할 수 있는 범위와 값을 저장할 수 있는 범위를 각각 명시해야 한다. 저장 경계는 [상세 표본·마스킹](../collection/detail-sampling.md)을 따른다.
 
 ## 입력과 문맥
 
-| 항목 | 확인할 내용 | 부족할 때 |
-| --- | --- | --- |
-| 논리 요청 | 같은 method·경로 의미·query·body인가 | 입력 불일치 또는 실행 오류로 조사 |
-| 사용자·권한 | 같은 사용자·테넌트·역할·권한 범위인가 | 정상 일치 판정 불가; 권한 차이는 별도 중요 오류 |
-| 데이터 | 같은 source 또는 비교 가능한 snapshot·freshness인가 | `not_comparable` 또는 명시된 제한 문맥 아래 비교 |
-| 시간·외부 의존 | now·random·외부 시세·모델 결과가 개입하는가 | 고정 입력·허용 오차·비교 제외 가능성을 정책으로 결정 |
-| 공개 계약 | v1/v2가 같은 의미의 성공·거절을 표현하는가 | 매핑 또는 호환 계약 정의 전 전환 불가 |
-| 수집 완전성 | 양쪽 body가 온전히 수신·캡처되었는가 | `not_comparable`, 부분 데이터로 정상 판정하지 않음 |
+비교기는 실행 결과와 제공된 비교 문맥으로 비교 가능 여부를 판정한다. 다음 표는 문맥별 확인 항목과 불충족 시 처리 기준이다.
 
-- route별 허용 문맥 수준과 데이터 시차 범위 명시
-- 근사 비교 허용 시 해당 한계와 문맥을 함께 기록
-- 허용 시차 초과·필수 문맥 부재 시 `not_comparable` 판정
-- 차이 원인을 확인하지 않은 채 데이터 문제로 일괄 제외 금지
-- backend 배포·데이터 revision 변경 시 기존 비교 구간과 분리; 확인 불가 값은 `unknown`으로 유지
+| 항목 | 확인할 내용 | 불일치하거나 확인할 수 없을 때 |
+| --- | --- | --- |
+| 논리 요청 | 양쪽 요청의 method, 경로의 의미, query 및 body가 같은 논리 입력을 나타내야 한다. | 실행 오류가 먼저 판정되는 경우를 제외하고 `not_comparable`로 분류한다. 입력 불일치와 입력 동등성 미확인을 구분한다. |
+| 사용자·권한 | 양쪽의 사용자, 테넌트, 역할 및 권한 범위가 같아야 한다. | `matched`로 판정해서는 안 된다. 확인된 권한 차이는 일반 값 차이와 별도로 조사해야 한다. |
+| 데이터 | 같은 source를 읽거나, snapshot과 freshness가 route의 비교 허용 조건을 만족해야 한다. | 허용 범위를 벗어나거나 필수 문맥을 확인할 수 없으면 `not_comparable`로 판정한다. |
+| 시간·외부 의존 | now, random, 외부 시세 또는 모델 결과의 응답 영향 여부를 확인해야 한다. | 고정 입력, 허용 오차 또는 필드 제외를 사용할 수 있는지는 route의 비교 정책으로 결정해야 한다. 결정되지 않은 차이를 임의로 제거해서는 안 된다. |
+| 공개 계약 | v1과 v2가 성공과 예상 거절을 같은 의미로 표현해야 한다. | 의도된 차이를 허용하려면 매핑 또는 호환 계약을 먼저 정의해야 한다. 그 계약 없이 전환 가능으로 판단해서는 안 된다. |
+| 수집 완전성 | 양쪽 body가 끝까지 수신되어야 한다. 비교에 필요한 범위가 완전히 캡처되어야 한다. | 실행 오류가 먼저 판정되는 경우를 제외하고 `not_comparable`로 분류한다. 캡처된 일부만 같다는 이유로 일치 처리해서는 안 된다. |
+
+논리 입력의 동등성, 권한 문맥의 동등성, 데이터의 비교 가능성은 모두 확인되어야 한다. 확인된 불일치와 확인할 수 없는 상태는 각각 mismatch와 unknown 이유로 구분한다. 동일한 body를 받았다는 사실로 이 세 문맥을 대신 확인해서는 안 된다.
+
+Route별 허용 문맥 수준과 데이터 시차 범위를 명시해야 한다. 근사 비교를 허용한 경우에는 허용 범위와 판정에 사용한 문맥을 함께 해석해야 한다. 차이의 원인을 확인하지 않은 채 모든 차이를 데이터 시차로 제외해서는 안 된다.
+
+Backend 배포 revision 또는 데이터 revision이 바뀌면 해당 결과를 기존 비교 구간과 분리해야 한다. 확인하지 못한 revision은 `unknown`으로 유지해야 한다.
 
 ## backend 결과 모델
 
-- backend 버전과 역할을 각각 저장
-- v2 serving 전환 시 v1이 shadow 역할 수행
+각 결과에는 backend 버전과 그 요청에서 맡은 역할을 각각 기록한다. v2가 serving이면 반대편 v1이 shadow이며, 역할이 바뀌어도 backend 식별자는 바뀌지 않는다.
 
 | 필드 | 값 또는 의미 |
 | --- | --- |
-| `backend` | `v1`, `v2` |
-| `deployment_revision` | 실제 실행 대상의 확인 가능한 배포 버전; 확인 불가 시 `unknown` |
-| `role` | `serving`, `shadow` |
-| `execution_outcome` | `http_response`, `transport_error`, `timeout`, `cancelled`, `not_dispatched` |
-| `contract_class` | `success`, `expected_rejection`, `unexpected_error`, `unknown` |
-| `status_code` | 응답 headers 수신 시 코드, 미수신 시 null; body 수신 실패 시에도 수신 코드는 보존 |
-| `duration_ms` | 실행 시작부터 완료·실패 확정까지의 시간, 미실행이면 null |
-| `response_bytes` | 수신한 본문 바이트 수와 완전 수신 여부 |
-| `capture_state` | `complete`, `oversized`, `unavailable`, `not_needed` |
-| `reason` | 유한한 이유 코드; credential이 섞인 원문 예외 메시지 제외 |
+| `backend` | 실행 대상 버전인 `v1` 또는 `v2`를 나타낸다. |
+| `deployment_revision` | 실제 실행 대상의 확인 가능한 배포 버전이다. 확인할 수 없으면 `unknown`으로 남긴다. |
+| `role` | 해당 요청에서의 `serving` 또는 `shadow` 역할이다. |
+| `execution_outcome` | 실행 결과를 `http_response`, `transport_error`, `timeout`, `cancelled`, `not_dispatched`로 구분한다. |
+| `contract_class` | route 계약에 따른 결과를 `success`, `expected_rejection`, `unexpected_error`, `unknown`으로 구분한다. |
+| `status_code` | 응답 header를 수신했으면 그 코드를 보존하고, 수신하지 못했으면 null로 남긴다. 이후 body 수신이 실패해도 이미 받은 코드를 지우지 않는다. |
+| `duration_ms` | Backend 실행 시작부터 응답 연결 정리 후 결과 확정까지의 시간이다. 연결 정리 시간도 포함한다. 실행하지 않았으면 null이다. |
+| `response_bytes` | 실제로 수신한 본문 바이트 수이다. 이 값만으로 완전 수신 여부를 판단해서는 안 된다. |
+| `response_complete` | 본문을 끝까지 수신했는지를 나타낸다. 수신 바이트 수와 함께 해석한다. |
+| `capture_state` | 비교용 캡처 상태를 `complete`, `oversized`, `unavailable`, `not_needed`로 구분한다. 캡처 상태는 저장용 상세 표본의 상태가 아니다. |
+| `reason` | 등록된 유한한 이유 코드를 사용한다. credential이 포함될 수 있는 원문 예외 메시지를 기록해서는 안 된다. |
 
-- HTTP 200 내부의 업무 실패: route 계약에 따라 `unexpected_error` 분류
-- 잘못된 입력의 400·권한 부족의 403: 등록 계약상 예상 동작인 경우에만 `expected_rejection` 분류
-- status code만으로 예상 거절 자동 확정 금지
-- body 수신 도중 연결 종료: `transport_error`와 불완전 수신 상태 기록; 완전 응답으로 처리 금지
-- 필수 body·정책 정보 부족으로 계약 판정 불가: `contract_class=unknown` 유지
+API의 업무 실패가 HTTP 200 안에 표현되는 경우에는 해당 route의 계약에서 그 실패를 `unexpected_error`로 분류할 수 있어야 한다. HTTP 200이라는 이유만으로 업무 성공으로 간주해서는 안 된다. 잘못된 입력의 400이나 권한 부족의 403은 등록 계약에서 예상 동작으로 정의한 경우에만 `expected_rejection`으로 분류한다. 일반적인 status code의 의미만으로 예상 거절을 자동 확정해서는 안 된다.
+
+Body 수신 도중 연결이 끊어지면 `transport_error`와 불완전 수신 상태를 기록한다. 완전 응답으로 처리해서는 안 된다. 계약 판정에 필요한 body 또는 정책 정보가 부족하면 `contract_class=unknown`을 유지한다.
 
 ## 비교 결과 모델
 
-- 최종 비교 이벤트: `result` 1개, 주된 `reason`, `comparison_class`, 양쪽 backend 결과로 구성
-- 여러 문제가 함께 발생한 경우 아래 우선순위로 주원인 선택; 개별 backend 결과는 별도 보존
+비교기는 다음 표의 우선순위에 따라 최종 결과를 선택한다. 상위 결과의 조건을 하나라도 만족하면 하위 결과로 진행하지 않는다. 주된 `reason` 하나가 모든 문제를 설명한다고 가정해서는 안 된다. 원인 조사 시 양쪽 backend 결과도 함께 확인해야 한다.
 
-| 우선순위 | `result` | 의미 |
+| 우선순위 | `result` | 판정 조건 |
 | --- | --- | --- |
-| 1 | `not_executed` | 선택된 shadow를 전송하지 못함. 과부하·본문 크기·종료 등의 원인 |
-| 2 | `execution_error` | 한쪽 이상 timeout·취소·전송 오류·예상 밖 API 오류 |
-| 3 | `not_comparable` | 양쪽 응답은 있으나 문맥·캡처·파싱·정책 한계 또는 계약 class 미확인으로 판정 불가 |
-| 4 | `different` | 비교 가능한 응답에서 status·계약 class·필수 헤더·JSON 의미가 다름 |
-| 5 | `matched` | 비교 가능한 두 성공 응답 또는 두 예상 거절 응답이 등록 정책에서 일치 |
+| 1 | `not_executed` | 표본으로 선택된 shadow를 전송하지 못했다. 과부하, 본문 크기 또는 종료 제한 등의 미실행 사유를 backend 결과에서 확인한다. |
+| 2 | `execution_error` | 한쪽 이상에서 timeout, 취소, 전송 오류 또는 예상 밖 API 오류가 발생했다. |
+| 3 | `not_comparable` | 앞선 미실행·실행 오류에 해당하지 않지만 문맥, 캡처, 파싱, 정책의 한계 또는 미확인 계약 class 때문에 비교할 수 없다. |
+| 4 | `different` | 비교 가능한 쌍에 정책을 적용한 뒤 status, 계약 class, 필수 header 또는 JSON 의미의 차이가 남는다. |
+| 5 | `matched` | 비교 가능한 두 성공 응답 또는 두 예상 거절 응답에 정책을 적용한 뒤 차이가 없다. |
+
+캡처가 `oversized` 또는 `unavailable`이면 비교 가능한 완전 응답으로 처리하지 않는다. `not_needed`는 빈 body 비교를 정책이 명시적으로 허용하고 실제 캡처 body가 비어 있는 경우에만 비교를 계속할 수 있다. 이후에도 문맥과 나머지 비교 조건을 충족해야 한다.
 
 | `comparison_class` | 적용 조건 |
 | --- | --- |
-| `success` | 양쪽 모두 `success`이며 비교 가능한 쌍 |
-| `expected_rejection` | 양쪽 모두 `expected_rejection`이며 비교 가능한 쌍 |
-| `mixed` | 한쪽 성공·반대편 예상 거절이며 비교 가능한 쌍 |
-| `unavailable` | 비실행·실행 오류·비교 불가로 위 세 class에 속하지 않는 쌍 |
+| `success` | 양쪽 모두 `contract_class=success`이고 비교 가능한 쌍이다. |
+| `expected_rejection` | 양쪽 모두 `contract_class=expected_rejection`이고 비교 가능한 쌍이다. |
+| `mixed` | 한쪽은 성공이고 반대편은 예상 거절인 비교 가능한 쌍이다. |
+| `unavailable` | 미실행, 실행 오류 또는 비교 불가로 앞의 세 class에 속하지 않는 쌍이다. |
 
-- `matched`의 성공 쌍·예상 거절 쌍 분리 집계
-- 같은 예상 밖 500 두 개: `execution_error`, `comparison_class=unavailable`
-- 양쪽 `contract_class=unknown`: 같다는 이유로 `matched` 처리 금지
-- 성공·예상 거절 혼합 쌍: `different`, `comparison_class=mixed`; 각 backend class 보존
-- 양쪽 실행 오류 메트릭은 최종 비교 결과와 독립 유지
-- shadow 표본 제외 요청: 비교 이벤트 생성 불필요, 선택 메트릭에 기록
-- 비교 큐 제출 실패: 비교 이벤트 유실 가능, `collection_dropped_total`로 감지된 드롭 보고
-- 저장되지 않은 이벤트의 가짜 `matched`·`not_executed` 행 생성 금지
+다음 사례는 결과와 class를 함께 해석해야 한다.
+
+- 같은 예상 밖 500 응답 두 개는 `execution_error`, `comparison_class=unavailable`이다. 내용이 같아도 `matched`가 아니다.
+- 양쪽 `contract_class=unknown`은 서로 같은 분류라는 이유로 `matched`가 되지 않는다.
+- 성공과 예상 거절이 섞인 비교 가능한 쌍은 `different`, `comparison_class=mixed`이다. 각 backend의 class도 보존한다.
+- `matched`인 성공 쌍과 `matched`인 예상 거절 쌍은 별도로 집계해야 한다. 양쪽 실행 오류 메트릭은 최종 비교 결과와 독립적으로 유지해야 한다.
+
+Shadow 표본에서 제외된 요청에는 비교 이벤트를 반드시 만들지는 않는다. 표본 제외 결과는 선택 메트릭에 기록한다. 표본으로 선택되었어도 비교 큐 제출이 실패하면 이벤트가 유실될 수 있다. 감지한 드롭은 `collection_dropped_total`로 보고한다. 저장되지 않은 이벤트를 보충하려고 가짜 `matched` 또는 `not_executed` 행을 만들어서는 안 된다.
 
 ## 요구사항과 수용 조건
 
 | ID | 우선순위 | 요구사항 | 수용 조건 |
 | --- | --- | --- | --- |
-| FR-17 | P0 | route별 성공·예상 거절·예상 밖 오류 계약 정의 | 같은 HTTP 500을 정상 일치로 집계하지 않고, 예상 4xx는 별도 분류 |
-| FR-20 | P0 | 비교 불가·실행 실패·비실행을 구분 | timeout·큰 본문·문맥 부족·드롭이 일치 결과로 처리되지 않음 |
+| FR-17 | P0 | route별 성공·예상 거절·예상 밖 오류 계약을 정의해야 한다. | 동일한 HTTP 500 두 개를 정상 일치로 집계하지 않는다. 계약상 예상된 4xx를 별도로 분류한다. |
+| FR-20 | P0 | 비교 불가·실행 실패·미실행을 구분해야 한다. | timeout, 큰 본문, 문맥 부족 또는 드롭을 일치 결과로 처리하지 않는다. |
 
-## 검증 계획
+## 검증 기준
 
-- 구현 후 검증: [T-16, T-17, T-21, T-22](../validation/test-catalog.md)
+검증 담당자는 [T-16, T-17, T-21, T-22](../validation/test-catalog.md)를 적용하십시오. 결과 우선순위, backend별 상태 보존, 문맥 미확인 시 일치 판정 금지를 확인하십시오.
 
 ## 관련 기능
 

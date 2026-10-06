@@ -66,8 +66,9 @@ def _comparison_policy(value: object) -> ComparisonPolicy:
 
 def load_settings(path: str | Path) -> Settings:
     try:
+        document = Path(path).read_text(encoding="utf-8")
         data = json.loads(
-            Path(path).read_text(encoding="utf-8"),
+            document,
             object_pairs_hook=_unique_object,
             parse_constant=_invalid_constant,
         )
@@ -82,7 +83,8 @@ def load_settings(path: str | Path) -> Settings:
         if not isinstance(data["comparison_policies"], list):
             raise ConfigurationError("comparison policies must be an array")
         policies: dict[str, ComparisonPolicy] = {}
-        for value in data["comparison_policies"]:
+        # Preserve decimal rules without changing numeric types in runtime budgets.
+        for value in json.loads(document, parse_float=Decimal)["comparison_policies"]:
             policy = _comparison_policy(value)
             if policy.revision in policies:
                 raise ConfigurationError("duplicate comparison policy revision")

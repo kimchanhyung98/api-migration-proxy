@@ -230,6 +230,51 @@ def test_json_pointer_escaping_and_mapping_conflict(policy):
 
 
 @pytest.mark.parametrize(
+    ("right", "expected", "reason"),
+    [
+        (b'{"items":[{"item_id":1}]}', "matched", "matched"),
+        (b'{"items":[{"id":1}]}', "not_comparable", "policy_mapping_conflict"),
+        (b'{"items":[{"item_id":1,"id":1}]}', "not_comparable", "policy_mapping_conflict"),
+    ],
+)
+def test_json_pointer_mapping_resolves_fields_in_arrays(policy, right, expected, reason):
+    policy = replace(policy, mappings=(FieldMapping("/items/0/id", "/items/0/item_id"),))
+    result = pair(b'{"items":[{"id":1}]}', right, policy)
+    assert (result.result, result.reason) == (expected, reason)
+
+
+def test_json_pointer_mapping_preserves_other_array_elements(policy):
+    policy = replace(policy, mappings=(FieldMapping("/1/0/a~1b", "/1/0/x~0y"),))
+    left = b'[{"unchanged":1},[{"a/b":2}]]'
+    right = b'[{"unchanged":1},[{"x~y":2}]]'
+    result = pair(left, right, policy)
+    assert result.result == "matched"
+    assert result.applied_rules == ("mapping:0",)
+    changed = b'[{"unchanged":3},[{"x~y":2}]]'
+    assert pair(left, changed, policy).result == "different"
+
+
+@pytest.mark.parametrize(
+    "index",
+    ["00", "01", "+0", "-1", "-", " 0", "٠", "1", pytest.param("9" * 5000, id="large-index")],
+)
+def test_json_pointer_mapping_does_not_alias_missing_array_indices(policy, index):
+    policy = replace(
+        policy, mappings=(FieldMapping(f"/items/{index}/id", f"/items/{index}/item_id"),)
+    )
+    result = pair(b'{"items":[{"id":1}]}', b'{"items":[{"item_id":1}]}', policy)
+    assert result.result == "different"
+    assert result.applied_rules == ()
+
+
+def test_json_pointer_mapping_keeps_numeric_object_keys(policy):
+    policy = replace(policy, mappings=(FieldMapping("/items/00/id", "/items/00/item_id"),))
+    result = pair(b'{"items":{"00":{"id":1}}}', b'{"items":{"00":{"item_id":1}}}', policy)
+    assert result.result == "matched"
+    assert result.applied_rules == ("mapping:0",)
+
+
+@pytest.mark.parametrize(
     ("left_class", "right_class", "expected", "comparison_class"),
     [
         ("success", "success", "matched", "success"),
