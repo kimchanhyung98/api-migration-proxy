@@ -24,6 +24,22 @@ jobs:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: proxy_test
+          POSTGRES_PASSWORD: proxy_test
+          POSTGRES_DB: proxy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proxy_test -d proxy_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      API_PROXY_TEST_POSTGRES_DSN: postgresql://proxy_test:proxy_test@127.0.0.1:5432/proxy_test
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +79,8 @@ jobs:
           "$RUNNER_TEMP/package/bin/api-migration-proxy" --help
           "$RUNNER_TEMP/package/bin/api-migration-proxy" check-config \
             --config "$GITHUB_WORKSPACE/tests/fixtures/proxy.json"
+          "$RUNNER_TEMP/package/bin/api-migration-proxy" check-config \
+            --config "$GITHUB_WORKSPACE/deploy/proxy.json"
 
   docker:
     name: Docker runtime and tests
@@ -73,6 +91,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Validate deployment configuration
+        run: docker compose config --quiet
 
       - name: Run container checks and HTTP integration tests
         run: make docker-test
@@ -86,3 +107,36 @@ jobs:
           docker run --rm \
             --mount "type=bind,source=$PWD/tests/fixtures/proxy.json,target=/config/proxy.json,readonly" \
             api-migration-proxy check-config --config /config/proxy.json
+
+      - name: Verify default runtime event storage
+        run: |
+          docker run --rm -i --entrypoint python api-migration-proxy - <<'PY'
+          import asyncio
+          import sqlite3
+          import stat
+          from pathlib import Path
+
+          from api_migration_proxy.collection.events import make_event
+          from api_migration_proxy.collection.sqlite import SQLiteEventStore
+          from api_migration_proxy.environment import load_run_options, read_environment
+
+          async def check():
+              path = load_run_options(read_environment()).event_store
+              store = SQLiteEventStore(path)
+              event = make_event({"route_id": "runtime-smoke"}, retention_seconds=60)
+              try:
+                  result = await store.write_batch([event])
+                  assert result.acknowledged == frozenset({event.event_id})
+              finally:
+                  await store.close()
+              with sqlite3.connect(path) as connection:
+                  row = connection.execute(
+                      "SELECT event_id FROM comparison_event WHERE event_id = ?",
+                      (event.event_id,),
+                  ).fetchone()
+              assert row == (event.event_id,)
+              assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+              assert stat.S_IMODE(Path(path).parent.stat().st_mode) == 0o700
+
+          asyncio.run(check())
+          PY

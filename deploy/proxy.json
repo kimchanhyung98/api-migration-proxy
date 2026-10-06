@@ -1,0 +1,55 @@
+{
+  "snapshot": {
+    "schema_version": 1,
+    "revision": "deployment-1",
+    "previous_revision": null,
+    "change_reason": "Initial v1-only deployment",
+    "default_v1": "http://127.0.0.1:8001",
+    "allowed_backends": [
+      "http://127.0.0.1:8001",
+      "http://127.0.0.1:8002"
+    ],
+    "budgets": {
+      "serving_timeout_seconds": 5,
+      "shadow_timeout_seconds": 2,
+      "client_send_timeout_seconds": 5,
+      "shutdown_grace_seconds": 5,
+      "serving_max_inflight": 16,
+      "shadow_max_inflight": 8,
+      "request_capture_limit_bytes": 65536,
+      "response_capture_limit_bytes": 65536
+    },
+    "routes": []
+  },
+  "comparison_policies": [{
+    "revision": "json-policy-1",
+    "max_body_bytes": 65536,
+    "max_decoded_body_bytes": 131072,
+    "max_json_depth": 32,
+    "max_json_nodes": 10000,
+    "max_number_digits": 64,
+    "max_number_exponent": 64,
+    "max_differences": 16,
+    "max_diff_paths": 8
+  }],
+  "work_limits": {
+    "compare_max_jobs": 16,
+    "compare_max_bytes": 2097152,
+    "compare_max_age_seconds": 3,
+    "compare_workers": 1,
+    "compare_timeout_seconds": 1,
+    "event_retention_seconds": 3600,
+    "environment": "deployment",
+    "migration_id": "api-migration",
+    "epoch_id": "deployment-1"
+  },
+  "collection_limits": {
+    "max_events": 64,
+    "max_bytes": 2097152,
+    "max_age_seconds": 5,
+    "batch_size": 16,
+    "write_timeout_seconds": 1,
+    "max_attempts": 2,
+    "retry_delay_seconds": 0.01
+  }
+}
