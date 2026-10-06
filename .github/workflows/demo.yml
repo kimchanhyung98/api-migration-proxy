@@ -8,6 +8,7 @@ on:
       - src/**
       - Dockerfile
       - .dockerignore
+      - .env.example
       - pyproject.toml
       - requirements-dev.txt
       - Makefile
@@ -19,6 +20,7 @@ on:
       - src/**
       - Dockerfile
       - .dockerignore
+      - .env.example
       - pyproject.toml
       - requirements-dev.txt
       - Makefile
@@ -26,13 +28,13 @@ on:
   workflow_dispatch:
     inputs:
       requests:
-        description: Sequential request count
+        description: Requests per serving stage
         type: number
         default: 1000
-      v2_ratio:
-        description: Expected v2 serving share (0 to 1)
+      shadow_requests:
+        description: Requests per shadow stage
         type: number
-        default: 0.5
+        default: 100
       tolerance:
         description: Absolute share tolerance (0.08 means 8 percentage points)
         type: number
@@ -51,9 +53,9 @@ defaults:
 
 jobs:
   demo:
-    name: Docker demo and serving distribution
+    name: Docker demo and migration scenarios
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       COMPOSE_PROJECT_NAME: demo-check-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -65,36 +67,45 @@ jobs:
       - name: Check demo code and HTTP integration tests
         run: make demo-docker-test
 
-      - name: Run isolated serving distribution scenario
+      - name: Run serving transition and rollback scenario
         env:
-          DEMO_DISTRIBUTION_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.requests) || '1000' }}
-          DEMO_DISTRIBUTION_V2_RATIO: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.v2_ratio) || '0.5' }}
-          DEMO_DISTRIBUTION_TOLERANCE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.tolerance) || '0.08' }}
-        run: make demo-distribution PYTHON=python3
+          DEMO_SCENARIO_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.requests) || '1000' }}
+          DEMO_SCENARIO_TOLERANCE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.tolerance) || '0.08' }}
+        run: make demo-scenario-serving PYTHON=python3
 
-      - name: Publish distribution summary
+      - name: Run shadow enable and stop scenario
+        env:
+          DEMO_SCENARIO_SHADOW_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.shadow_requests) || '100' }}
+        run: make demo-scenario-shadow PYTHON=python3
+
+      - name: Publish scenario summaries
         if: always()
         run: |
-          if [ -d .demo/results/distribution ]; then
-            find .demo/results/distribution -name summary.md -exec cat {} + >> "$GITHUB_STEP_SUMMARY"
+          if [ -d .demo/results/scenarios ]; then
+            find .demo/results/scenarios -name summary.md -exec cat {} + >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Remove isolated demo test resources
         if: always()
         run: docker compose --file .demo/compose.yml down --volumes --remove-orphans --timeout 15
 
-      - name: Preserve distribution reports and container logs
+      - name: Preserve scenario reports and container logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: demo-distribution-${{ github.run_id }}-${{ github.run_attempt }}
+          name: demo-scenarios-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            .demo/results/distribution/*/config.json
-            .demo/results/distribution/*/report.json
-            .demo/results/distribution/*/validation.json
-            .demo/results/distribution/*/summary.md
-            .demo/results/distribution/*/execution.log
-            .demo/results/distribution/*/containers.log
+            .demo/results/scenarios/*/summary.md
+            .demo/results/scenarios/*/validation.json
+            .demo/results/scenarios/*/execution.log
+            .demo/results/scenarios/*/containers.log
+            .demo/results/scenarios/*/*/config.json
+            .demo/results/scenarios/*/*/report.json
+            .demo/results/scenarios/*/*/observation.json
+            .demo/results/scenarios/*/*/events.json
+            .demo/results/scenarios/*/*/stored-events.json
+            .demo/results/scenarios/*/*/proxy.log
+            .demo/results/scenarios/*/*/validation.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
