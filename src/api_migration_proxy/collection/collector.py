@@ -7,6 +7,8 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
+from traceback import clear_frames
 from typing import Protocol
 
 from .events import CollectionEvent, _finite
@@ -62,6 +64,8 @@ class BoundedCollector:
         self.counters: Counter[str] = Counter()
         self._queue: deque[tuple[CollectionEvent, int]] = deque()
         self._pending: dict[str, tuple[CollectionEvent, int]] = {}
+        self._writes: dict[str, asyncio.Task[BatchResult]] = {}
+        self._finished: set[str] = set()
         self._worker: asyncio.Task[None] | None = None
         self._bytes = 0
         self._closed = False
@@ -116,10 +120,14 @@ class BoundedCollector:
         }
 
     def _finish(self, event: CollectionEvent, outcome: str) -> None:
-        entry = self._pending.pop(event.event_id, None)
-        if entry is None:
+        entry = self._pending.get(event.event_id)
+        if entry is None or event.event_id in self._finished:
             return
-        self._bytes -= entry[1]
+        if event.event_id in self._writes:
+            self._finished.add(event.event_id)
+        else:
+            self._pending.pop(event.event_id)
+            self._bytes -= entry[1]
         self.counters[outcome] += 1
         if outcome == "ack_unknown":
             self.completeness_known = False
@@ -134,6 +142,19 @@ class BoundedCollector:
             except Exception:
                 self.counters["notification_failed"] += 1
 
+    def _write_done(self, event_ids: tuple[str, ...], task: asyncio.Task[BatchResult]) -> None:
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                # Executor exceptions can retain completed payloads through traceback cycles.
+                clear_frames(failure.__traceback__)
+                failure.__traceback__ = None
+        for event_id in event_ids:
+            self._writes.pop(event_id)
+            if event_id in self._finished:
+                self._finished.remove(event_id)
+                self._bytes -= self._pending.pop(event_id)[1]
+
     async def _run(self) -> None:
         try:
             while self._queue:
@@ -142,13 +163,17 @@ class BoundedCollector:
                     for _ in range(min(len(self._queue), self.limits.batch_size))
                 ]
                 await self._write(batch)
+        except asyncio.CancelledError:
+            pass  # The private worker must not retain cancelled wait frames and write tasks.
         finally:
             for event, _ in list(self._pending.values()):
                 self._finish(event, "dropped_shutdown")
+                del event
             self._queue.clear()
 
     async def _write(self, batch: list[CollectionEvent]) -> None:
         uncertain: set[str] = set()
+        attempt_pending = False
         try:
             for attempt in range(self.limits.max_attempts):
                 now = time.monotonic()
@@ -159,19 +184,34 @@ class BoundedCollector:
                             "ack_unknown" if event.event_id in uncertain else "dropped_expired",
                         )
                         batch.remove(event)
+                    del event
                 if not batch:
                     return
                 remaining = min(
                     self.limits.max_age_seconds - (now - event.created_monotonic) for event in batch
                 )
+                attempt_pending = True
+                write = asyncio.create_task(self.store.write_batch(tuple(batch)))
+                event_ids = tuple(event.event_id for event in batch)
+                self._writes.update((event_id, write) for event_id in event_ids)
+                write.add_done_callback(partial(self._write_done, event_ids))
                 try:
-                    result = await asyncio.wait_for(
-                        self.store.write_batch(batch),
-                        min(remaining, self.limits.write_timeout_seconds),
+                    done, _pending = await asyncio.wait(
+                        {write}, timeout=min(remaining, self.limits.write_timeout_seconds)
                     )
+                    if not done:
+                        self.counters["write_failures"] += 1
+                        self.counters["ack_unknown_attempts"] += len(batch)
+                        for event in batch:
+                            self._finish(event, "ack_unknown")
+                        return
+                    result = write.result()
                 except Exception:
                     self.counters["write_failures"] += 1
                     result = BatchResult(unknown=frozenset(event.event_id for event in batch))
+                finally:
+                    del write
+                    done = _pending = set()
                 acknowledged = result.acknowledged - result.failed - result.unknown
                 if result.failed:
                     self.counters["write_failures"] += 1
@@ -179,9 +219,15 @@ class BoundedCollector:
                     if event.event_id in acknowledged:
                         self._finish(event, "stored")
                         batch.remove(event)
-                    elif event.event_id not in result.failed or event.event_id in result.unknown:
+                    elif (
+                        event.event_id not in result.failed
+                        or event.event_id in result.unknown
+                        or event.event_id in result.acknowledged
+                    ):
                         uncertain.add(event.event_id)
                         self.counters["ack_unknown_attempts"] += 1
+                    del event
+                attempt_pending = False
                 if batch and attempt + 1 < self.limits.max_attempts:
                     self.counters["retries"] += len(batch)
                     remaining = min(
@@ -196,13 +242,22 @@ class BoundedCollector:
                 )
         except asyncio.CancelledError:
             for event in batch:
-                self._finish(event, "ack_unknown")
+                self._finish(
+                    event,
+                    "ack_unknown"
+                    if attempt_pending or event.event_id in uncertain
+                    else "dropped_shutdown",
+                )
+                del event
+            batch.clear()
             self.completeness_known = False
             raise
 
     async def flush(self) -> None:
         if self._worker is not None:
             await asyncio.shield(self._worker)
+        if self._writes:
+            await asyncio.wait(set(self._writes.values()))
 
     async def close(self, timeout: float) -> bool:
         if not _finite(timeout) or timeout <= 0:

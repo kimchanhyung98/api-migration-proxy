@@ -18,6 +18,7 @@ def test_request_cohort_keeps_late_work_in_original_epoch_and_deduplicates_ack()
         window.close(250)
     observation.terminal()
     observation.compared("different", "success", "json_value_mismatch")
+    assert not observation.dispatched()
     assert observation.stored()
     assert not observation.stored()
     assert not observation.terminal()
@@ -84,6 +85,9 @@ def test_selected_without_dispatch_can_store_but_does_not_become_comparable():
     observation.eligible()
     observation.selected()
     observation.compared("not_executed", "unavailable", "slot_exhausted")
+    with pytest.raises(ValueError, match="invalid pipeline transition"):
+        observation.dispatched()
+    assert metrics.value("comparison_pipeline_total", route="catalog", step="dispatched") == 0
     observation.stored()
     observation.finish()
     window.close(10)

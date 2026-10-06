@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from collections import Counter
@@ -16,7 +17,7 @@ from .query import EventQuery, QueryAccess
 
 
 class SQLiteEventStore:
-    """SQLite event storage for the Proxy CLI; production storage remains undecided."""
+    """Private local SQLite event storage for the Proxy CLI."""
 
     def __init__(self, path: str, *, create: bool = True):
         self._path = path
@@ -27,23 +28,53 @@ class SQLiteEventStore:
         self._closing: asyncio.Future | None = None
         self.counters: Counter[str] = Counter()
 
+    def _prepare_file(self) -> None:
+        if self._path == ":memory:":
+            return
+        path = Path(self._path)
+        if self._create:
+            missing = []
+            directory = path.parent
+            while not directory.exists():
+                missing.append(directory)
+                directory = directory.parent
+            for directory in reversed(missing):
+                directory.mkdir(mode=0o700, exist_ok=True)
+        descriptor = os.open(path, os.O_RDWR | (os.O_CREAT if self._create else 0), 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+
     def _db(self) -> sqlite3.Connection:
         if self._connection is None:
+            self._prepare_file()
             if not self._create:
                 self._connection = sqlite3.connect(
                     Path(self._path).resolve().as_uri() + "?mode=rw", uri=True, timeout=1
                 )
                 return self._connection
-            self._connection = sqlite3.connect(self._path, timeout=1)
-            self._connection.execute("""CREATE TABLE IF NOT EXISTS comparison_event (
-                event_id TEXT PRIMARY KEY, created_at REAL NOT NULL, summary_expires_at REAL NOT NULL,
-                detail_expires_at REAL, route_id TEXT NOT NULL, result TEXT NOT NULL, reason TEXT NOT NULL,
-                configuration_revision TEXT NOT NULL, comparison_policy_revision TEXT NOT NULL,
-                summary TEXT NOT NULL, detail TEXT, stored_at REAL NOT NULL
-            )""")
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS event_route_time ON comparison_event(route_id, created_at)"
-            )
+            connection = sqlite3.connect(self._path, timeout=1)
+            try:
+                connection.execute("""CREATE TABLE IF NOT EXISTS comparison_event (
+                    event_id TEXT PRIMARY KEY, created_at REAL NOT NULL, summary_expires_at REAL NOT NULL,
+                    detail_expires_at REAL, route_id TEXT NOT NULL, result TEXT NOT NULL, reason TEXT NOT NULL,
+                    configuration_revision TEXT NOT NULL, comparison_policy_revision TEXT NOT NULL,
+                    summary TEXT NOT NULL, detail TEXT, stored_at REAL NOT NULL
+                )""")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_route_time ON comparison_event(route_id, created_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_summary_expiry ON comparison_event(summary_expires_at)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS event_detail_expiry ON comparison_event(detail_expires_at) WHERE detail IS NOT NULL"
+                )
+            except BaseException:
+                connection.close()
+                raise
+            self._connection = connection
         return self._connection
 
     async def _run(self, operation: Callable[[], Any]) -> Any:
@@ -57,8 +88,15 @@ class SQLiteEventStore:
         except BaseException:
             self._slot.release()
             raise
-        future.add_done_callback(lambda _: self._slot.release())
-        return await asyncio.shield(future)
+
+        def completed(operation: asyncio.Future) -> None:
+            self._slot.release()
+            if not operation.cancelled():
+                operation.exception()
+
+        future.add_done_callback(completed)
+        await asyncio.wait((future,))
+        return future.result()
 
     async def write_batch(self, events: Sequence[CollectionEvent]) -> BatchResult:
         def write() -> BatchResult:
@@ -69,7 +107,10 @@ class SQLiteEventStore:
                     if event.detail is not None:
                         summary["detail_state"] = "stored"
                     db.execute(
-                        "INSERT OR IGNORE INTO comparison_event VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO comparison_event ("
+                        "event_id, created_at, summary_expires_at, detail_expires_at, route_id, result, "
+                        "reason, configuration_revision, comparison_policy_revision, summary, detail, stored_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
                         (
                             event.event_id,
                             event.created_at,
@@ -81,7 +122,7 @@ class SQLiteEventStore:
                             summary["configuration_revision"],
                             summary["comparison_policy_revision"],
                             json.dumps(summary, allow_nan=False),
-                            json.dumps(event.detail, allow_nan=False)
+                            json.dumps(event.detail, allow_nan=False, ensure_ascii=False)
                             if event.detail is not None
                             else None,
                             time.time(),
@@ -105,9 +146,11 @@ class SQLiteEventStore:
             raise ValueError("query_limit_exceeded")
         if query.backend not in (None, "v1", "v2") or query.role not in (None, "serving", "shadow"):
             raise ValueError("invalid_backend_filter")
-        current = time.time() if now is None else now
+        if now is not None and not _finite(now):
+            raise ValueError("invalid_query_time")
 
         def read() -> list[dict[str, Any]]:
+            current = time.time() if now is None else now
             clauses = [
                 "created_at >= ?",
                 "created_at < ?",
@@ -151,8 +194,11 @@ class SQLiteEventStore:
                 )
                 .fetchall()
             )
+            current = time.time() if now is None else now
             results = []
             for event_id, created, expires, detail_expires, raw, detail, stored in rows:
+                if expires <= current:
+                    continue
                 summary = json.loads(raw)
                 expired = detail_expires is not None and detail_expires <= current
                 if expired and summary["detail_state"] == "stored":
@@ -181,33 +227,32 @@ class SQLiteEventStore:
             raise ValueError("invalid_delete_time")
 
         def purge() -> dict[str, int]:
-            db = self._db()
-            with db:
-                details = db.execute(
-                    "UPDATE comparison_event SET detail = NULL, summary = json_set(summary, '$.detail_state', 'expired') WHERE event_id IN (SELECT event_id FROM comparison_event WHERE detail IS NOT NULL AND detail_expires_at <= ? LIMIT ?)",
-                    (current, batch_size),
-                ).rowcount
-                summaries = db.execute(
-                    "DELETE FROM comparison_event WHERE event_id IN (SELECT event_id FROM comparison_event WHERE summary_expires_at <= ? LIMIT ?)",
-                    (current, batch_size),
-                ).rowcount
-            pending = db.execute(
-                "SELECT count(*) FROM comparison_event WHERE summary_expires_at <= ? OR (detail IS NOT NULL AND detail_expires_at <= ?)",
-                (current, current),
-            ).fetchone()[0]
+            try:
+                db = self._db()
+                with db:
+                    details = db.execute(
+                        "UPDATE comparison_event SET detail = NULL, summary = json_set(summary, '$.detail_state', 'expired') WHERE event_id IN (SELECT event_id FROM comparison_event WHERE detail IS NOT NULL AND detail_expires_at <= ? LIMIT ?)",
+                        (current, batch_size),
+                    ).rowcount
+                    summaries = db.execute(
+                        "DELETE FROM comparison_event WHERE event_id IN (SELECT event_id FROM comparison_event WHERE summary_expires_at <= ? LIMIT ?)",
+                        (current, batch_size),
+                    ).rowcount
+                pending = db.execute(
+                    "SELECT count(*) FROM comparison_event WHERE summary_expires_at <= ? OR (detail IS NOT NULL AND detail_expires_at <= ?)",
+                    (current, current),
+                ).fetchone()[0]
+            except Exception:
+                self.counters["purge_failures"] += 1
+                raise
+            self.counters["expired_pending"] = pending
             return {
                 "details_deleted": details,
                 "summaries_deleted": summaries,
                 "expired_pending": pending,
             }
 
-        try:
-            outcome = await self._run(purge)
-        except Exception:
-            self.counters["purge_failures"] += 1
-            raise
-        self.counters["expired_pending"] = outcome["expired_pending"]
-        return outcome
+        return await self._run(purge)
 
     async def close(self) -> None:
         def close_db() -> None:
@@ -219,5 +264,9 @@ class SQLiteEventStore:
             # The single executor closes the connection after any in-flight write,
             # even when its caller has stopped waiting for an acknowledgement.
             self._closing = asyncio.get_running_loop().run_in_executor(self._executor, close_db)
+            self._closing.add_done_callback(
+                lambda future: future.exception() if not future.cancelled() else None
+            )
             self._executor.shutdown(wait=False)
-        await asyncio.shield(self._closing)
+        await asyncio.wait((self._closing,))
+        self._closing.result()

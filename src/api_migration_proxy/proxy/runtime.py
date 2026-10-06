@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -27,6 +27,9 @@ from api_migration_proxy.routing.selection import backend_url, choose_serving, m
 
 from .pipeline import ComparisonPipeline, WorkLimits
 from .transport import BackendTransport, forwarding_headers
+
+if TYPE_CHECKING:
+    from api_migration_proxy.collection.retention import RetentionWorker
 
 
 def _utc() -> str:
@@ -141,12 +144,14 @@ class ProxyRuntime:
         identity_provider: Callable | None = None,
         detail_policy: DetailPolicy | None = None,
         detail_provider: Callable | None = None,
+        maintenance: RetentionWorker | None = None,
     ):
         self.config, self.policies = config, MappingProxyType(dict(comparison_policies))
         self.work_limits, self.collector, self.metrics = work_limits, collector, metrics
         self.context_provider = context_provider
         self.response_classifier = response_classifier
         self.identity_provider = identity_provider
+        self.maintenance = maintenance
         self._comparison = ComparisonPipeline(
             work_limits,
             collector,
@@ -244,6 +249,8 @@ class ProxyRuntime:
             "shadow": BackendTransport(budgets.shadow_timeout_seconds, budgets.shadow_max_inflight),
         }
         self._comparison.start()
+        if self.maintenance is not None:
+            self.maintenance.start()
         self._accepting = True
 
     def _drop(self, reason: str) -> None:
@@ -266,6 +273,8 @@ class ProxyRuntime:
             return
         grace = self._initial_budgets.shutdown_grace_seconds
         deadline = time.monotonic() + grace
+        if self.maintenance is not None:
+            await self.maintenance.close(max(0, deadline - time.monotonic()))
         for group in (self._active, self._pairs):
             pending = set(group)
             if pending:

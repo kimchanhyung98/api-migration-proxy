@@ -112,6 +112,8 @@ class PipelineObservation:
         with self._lock:
             if symbol in self._seen:
                 return False
+            if symbol == "D" and self._result is not None:
+                raise ValueError("invalid pipeline transition")
             if self._finished or (prerequisite and prerequisite not in self._seen):
                 raise ValueError("invalid pipeline transition")
             self.metrics.increment(

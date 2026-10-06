@@ -10,6 +10,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from traceback import clear_frames
 from typing import Any
 
 from api_migration_proxy.collection.collector import BoundedCollector
@@ -172,6 +173,7 @@ class ComparisonPipeline:
             job = await self._queue.get()
             route_id = job.summary["route_id"]
             future: asyncio.Future[Any] | None = None
+            result = event = None
             settled = False
             try:
                 age = time.monotonic() - job.submitted
@@ -185,7 +187,7 @@ class ComparisonPipeline:
                 future = asyncio.get_running_loop().run_in_executor(
                     self._pool, compare, job.v1, job.v2, job.policy, job.context
                 )
-                done, _ = await asyncio.wait(
+                done, _pending = await asyncio.wait(
                     {future},
                     timeout=min(
                         self.limits.compare_timeout_seconds,
@@ -196,7 +198,8 @@ class ComparisonPipeline:
                     self._drop("timeout")
                     settled = True
                     # The thread still owns its input and slot until computation actually ends.
-                    await asyncio.shield(future)
+                    await asyncio.wait({future})
+                    future.result()
                     continue
                 result = future.result()
                 self.metrics.observe(
@@ -226,7 +229,7 @@ class ComparisonPipeline:
                     future = asyncio.get_running_loop().run_in_executor(
                         self._pool, self._detail_event, job, result, event
                     )
-                    done, _ = await asyncio.wait(
+                    done, _pending = await asyncio.wait(
                         {future},
                         timeout=max(
                             0,
@@ -265,18 +268,25 @@ class ComparisonPipeline:
                 if detail_pending:
                     # The safe summary is submitted, but this slot still owns the raw detail task.
                     try:
-                        await asyncio.shield(future)
+                        await asyncio.wait({future})
+                        future.result()
                     except Exception:
                         pass
             except asyncio.CancelledError:
                 if not settled:
                     self._drop("shutdown")
-                if future is not None and not future.done():
-                    try:
-                        await asyncio.shield(future)
-                    except Exception:
-                        pass
-                raise
+                if future is not None:
+                    while not future.done():
+                        try:
+                            await asyncio.wait({future})
+                        except asyncio.CancelledError:
+                            pass
+                    if not future.cancelled():
+                        failure = future.exception()
+                        if failure is not None:
+                            clear_frames(failure.__traceback__)
+                            failure.__traceback__ = None
+                return
             except Exception:
                 if not settled:
                     self._drop("comparison_dropped")
@@ -284,6 +294,11 @@ class ComparisonPipeline:
                 self._jobs -= 1
                 self._job_bytes -= job.size
                 self._queue.task_done()
+                # Idle workers must not retain completed captures or exception tracebacks.
+                del job
+                future = None
+                done = _pending = set()
+                result = event = None
 
     async def flush(self) -> None:
         await self._queue.join()
