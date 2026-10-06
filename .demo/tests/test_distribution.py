@@ -1,6 +1,6 @@
 import pytest
 
-from tests.distribution import evaluate
+from scenarios.distribution import evaluate
 
 
 def report(v1=500, v2=500, unknown=0):

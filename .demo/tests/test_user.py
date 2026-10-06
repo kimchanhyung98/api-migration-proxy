@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from tests.distribution import evaluate
+from scenarios.distribution import evaluate
 from user.cli import main, run
 
 

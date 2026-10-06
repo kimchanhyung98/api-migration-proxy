@@ -1,4 +1,4 @@
-.PHONY: help check lint typecheck test up down reload docker-test smoke request distribution
+.PHONY: help check lint typecheck test up down reload docker-test smoke request distribution scenario-serving scenario-shadow
 
 PYTHON ?= ../.venv/bin/python
 COMPOSE = docker compose -f compose.yml
@@ -7,6 +7,9 @@ REPORT ?= results/user.json
 DEMO_DISTRIBUTION_REQUESTS ?= 1000
 DEMO_DISTRIBUTION_V2_RATIO ?= 0.5
 DEMO_DISTRIBUTION_TOLERANCE ?= 0.08
+DEMO_SCENARIO_REQUESTS ?= 1000
+DEMO_SCENARIO_SHADOW_REQUESTS ?= 100
+DEMO_SCENARIO_TOLERANCE ?= 0.08
 
 .DEFAULT_GOAL := help
 
@@ -16,11 +19,11 @@ help: ## 데모 명령 목록
 check: lint typecheck test ## 데모 코드·테스트만 검증
 
 lint: ## 데모 코드 린트·형식 검사
-	$(PYTHON) -m ruff check --no-cache backend.py v1 v2 user tests
-	$(PYTHON) -m ruff format --check --no-cache backend.py v1 v2 user tests
+	$(PYTHON) -m ruff check --no-cache backend.py v1 v2 user scenarios tests
+	$(PYTHON) -m ruff format --check --no-cache backend.py v1 v2 user scenarios tests
 
 typecheck: ## 데모 실행 코드 타입 검사
-	$(PYTHON) -m mypy --cache-dir /tmp/api-migration-proxy-demo-mypy backend.py v1 v2 user tests/distribution.py tests/run_distribution.py
+	$(PYTHON) -m mypy --cache-dir /tmp/api-migration-proxy-demo-mypy backend.py v1 v2 user scenarios
 
 test: ## 데모 테스트 실행
 	$(PYTHON) -m pytest -c pyproject.toml
@@ -39,7 +42,7 @@ docker-test: ## 별도 데모 이미지에서 데모 검사 실행
 	$(COMPOSE) --profile test run --build --rm --no-deps test
 
 smoke: ## 실행 중인 데모 HTTP·내부 이벤트 저장 검증
-	$(COMPOSE) --profile test run --build --rm --no-deps test python -m tests.smoke --url http://proxy:8080 --event-store /data/events.sqlite --serving "$(SERVING_BACKEND)"
+	$(COMPOSE) --profile test run --build --rm --no-deps test python -m scenarios.smoke --url http://proxy:8080 --event-store /data/events.sqlite --serving "$(SERVING_BACKEND)"
 
 request: ## Proxy에 요청을 보내 응답 비율·오류·지연 기록
 	$(COMPOSE) build user
@@ -48,4 +51,10 @@ request: ## Proxy에 요청을 보내 응답 비율·오류·지연 기록
 	@cat "$(REPORT)"
 
 distribution: ## 독립 Docker 환경에서 serving 응답 분배 검증
-	$(PYTHON) -m tests.run_distribution --requests "$(DEMO_DISTRIBUTION_REQUESTS)" --v2-ratio "$(DEMO_DISTRIBUTION_V2_RATIO)" --tolerance "$(DEMO_DISTRIBUTION_TOLERANCE)"
+	$(PYTHON) -m scenarios.run_distribution --requests "$(DEMO_DISTRIBUTION_REQUESTS)" --v2-ratio "$(DEMO_DISTRIBUTION_V2_RATIO)" --tolerance "$(DEMO_DISTRIBUTION_TOLERANCE)"
+
+scenario-serving: ## 같은 환경에서 serving 전환·복귀와 관측값 검증
+	$(PYTHON) -m scenarios.run_scenarios serving --requests "$(DEMO_SCENARIO_REQUESTS)" --tolerance "$(DEMO_SCENARIO_TOLERANCE)"
+
+scenario-shadow: ## 같은 환경에서 양방향 shadow 실행·중지와 저장 검증
+	$(PYTHON) -m scenarios.run_scenarios shadow --requests "$(DEMO_SCENARIO_SHADOW_REQUESTS)"

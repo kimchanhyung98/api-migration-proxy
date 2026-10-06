@@ -24,4 +24,4 @@ COPY src/ /proxy/src/
 RUN python -m pip install --no-cache-dir -r /tmp/constraints.txt /proxy
 COPY .demo/ ./
 USER 10001:10001
-CMD ["sh", "-c", "python -m ruff check --no-cache backend.py v1 v2 user tests && python -m ruff format --check --no-cache backend.py v1 v2 user tests && python -m mypy --cache-dir /tmp/demo-mypy backend.py v1 v2 user tests/distribution.py tests/run_distribution.py && python -m pip check && python -m pytest -c pyproject.toml"]
+CMD ["sh", "-c", "python -m ruff check --no-cache backend.py v1 v2 user scenarios tests && python -m ruff format --check --no-cache backend.py v1 v2 user scenarios tests && python -m mypy --cache-dir /tmp/demo-mypy backend.py v1 v2 user scenarios && python -m pip check && python -m pytest -c pyproject.toml"]

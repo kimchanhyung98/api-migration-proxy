@@ -1,5 +1,5 @@
 .PHONY: help check test lint typecheck build init run docker-build docker-test
-.PHONY: demo-up demo-down demo-request demo-reload demo-smoke demo-check demo-docker-test demo-distribution
+.PHONY: demo-up demo-down demo-request demo-reload demo-smoke demo-check demo-docker-test demo-distribution demo-scenario-serving demo-scenario-shadow
 
 PYTHON ?= .venv/bin/python
 PYTHON_BOOTSTRAP ?= python3
@@ -51,6 +51,8 @@ demo-smoke: ## 실행 중인 데모의 HTTP·이벤트 저장 검증
 demo-check: ## 데모 코드 린트·타입 검사·테스트
 demo-docker-test: ## Docker에서 데모 코드·테스트 검증
 demo-distribution: ## 독립 Docker 환경에서 v1·v2 응답 분배 검증
+demo-scenario-serving: ## shadow 없이 v1 → 50:50 → v2 → v1 전환 검증
+demo-scenario-shadow: ## v1·v2 serving별 shadow 실행·중지 검증
 
-demo-up demo-down demo-request demo-reload demo-smoke demo-check demo-docker-test demo-distribution:
+demo-up demo-down demo-request demo-reload demo-smoke demo-check demo-docker-test demo-distribution demo-scenario-serving demo-scenario-shadow:
 	@$(MAKE) --no-print-directory -C .demo $(@:demo-%=%) PYTHON="$(if $(findstring /,$(PYTHON)),$(abspath $(PYTHON)),$(PYTHON))"
