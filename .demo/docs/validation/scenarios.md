@@ -3,7 +3,7 @@
 - 목적: 같은 backend·이벤트 volume을 유지하며 설정 전환과 실제 관측 결과 대조.
 - 실행: `.demo/scenarios/`의 별도 도구. pytest에서 전체 흐름을 실행하지 않음.
 - 대상: Docker v1·v2·제품 Proxy·User, 컨테이너 내부 health·backend 호출 수·읽기 전용 SQLite 조회.
-- 전제: Docker Engine·Compose, Python 3.12 이상. 프로젝트 루트에서 실행.
+- 전제: Docker Engine·Compose, Python 3.13 이상. 프로젝트 루트에서 실행.
 - `demo-up` 선행 불필요. 각 명령은 고유 Compose project·새 이벤트 volume·임의 loopback 포트 사용.
 
 ## 실행

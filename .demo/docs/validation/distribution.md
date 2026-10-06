@@ -8,7 +8,7 @@
 
 ## 실행
 
-- 전제: Docker Engine·Compose 실행, Python 3.12 이상 사용 가능.
+- 전제: Docker Engine·Compose 실행, Python 3.13 이상 사용 가능.
 - 명령 실행 위치: 프로젝트 루트.
 - 기존 데모의 `demo-up` 불필요. 실행마다 독립 환경 구성.
 

@@ -13,7 +13,7 @@ make demo-check
 make demo-docker-test
 ```
 
-- 호스트 전제: Python 3.12 이상과 프로젝트 개발 의존성 설치.
+- 호스트 전제: Python 3.13 이상과 프로젝트 개발 의존성 설치.
 - `demo-check`: 데모 코드·실행 도구·테스트의 lint·format·타입 검사와 개별 pytest 실행.
 - `demo-docker-test`: 별도 데모 이미지에서 같은 검사, 의존성 검사, 개별 pytest 실행.
 - HTTP 기능 테스트는 필요한 프로세스를 직접 시작·종료. `demo-up` 선행 불필요.
