@@ -1,6 +1,7 @@
 # User 호출과 집계
 
 - 역할: Proxy에 순차 GET 요청을 보내 사용자에게 반환된 응답의 버전·상태·지연 집계.
+- 기본 실행: 100회, v1 응답 100%, shadow OFF. `.demo/.env` 없이 기본값 사용 가능.
 - 구현: [User CLI](../../user/cli.py). DB·Proxy 내부 관리 API 접근 없음.
 - 실행 형태: 일회성 컨테이너. [Docker 실행](../runtime/README.md)으로 v1·v2·Proxy를 먼저 시작한 뒤 호출.
 
@@ -20,6 +21,7 @@ DEMO_REQUESTS=10 DEMO_PATH=/items/error make demo-request REPORT=results/500.jso
 | `DEMO_TIMEOUT` | `5` | HTTP 클라이언트 timeout, 초 단위 양의 유한값 |
 | `REPORT` | `results/user.json` | `.demo` 기준 출력 파일 경로 |
 
+- `.demo/.env`에서 기본 요청 옵션 설정 가능. 셸의 동일 환경변수로 덮어쓰기.
 - Compose의 User 대상: `http://proxy:8080`. 호스트 공개 포트를 바꿔도 동일.
 - 결과: JSON을 화면과 `REPORT` 파일에 출력. 같은 경로를 다시 사용하면 덮어쓰기.
 - `make demo-request`: User 이미지 빌드·실행만 수행. 기반 서비스 시작·설정 적용은 별도.
@@ -48,7 +50,7 @@ DEMO_REQUESTS=10 DEMO_PATH=/items/error make demo-request REPORT=results/500.jso
 - 404·500: 응답을 받은 HTTP 오류로 집계. 네트워크 실패와 구분.
 - v2 본문의 `code`·`message`는 집계 기준이 아님. HTTP 상태와 버전 헤더를 사용하며, 본문 계약은 [합성 API·smoke 테스트](../validation/README.md)에서 검증.
 - 저장 제외: URL·query·응답 본문·개별 헤더·예외 원문·인증 정보.
-- 종료 코드 0: 보고서 생성 성공 의미. 요청 성공률·분배 통과를 보장하지 않으므로 [응답 분배 검증](../validation/distribution.md)으로 별도 판정.
+- 종료 코드 0: 보고서 생성 성공 의미. 요청 성공률·분배 통과를 보장하지 않으므로 [순차 시나리오](../validation/scenarios.md) 또는 [단일 분배 검사](../validation/distribution.md)로 별도 판정.
 
 ## 측정 범위
 

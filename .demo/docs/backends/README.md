@@ -43,6 +43,8 @@
 - `/health`를 Proxy로 요청할 경우 등록된 전환 route가 아니므로 기본 v1에 전달. 분배 검증은 `/items/different` 사용.
 - 등록되지 않은 경로의 404·지원하지 않는 메서드의 405에도 버전별 오류 구조 적용. 405의 `Allow` 헤더 유지.
 - v2의 공통 404: `code="NOT_FOUND"`, `message="Not found."`; 공통 405: `code="METHOD_NOT_ALLOWED"`, `message="Method not allowed."`. 두 응답 모두 `result=[]`.
+- `GET /__demo/requests`: `{"version":"v1","items":0}` 또는 v2 버전의 누적 item 요청 수 반환. 데모 관측 전용이며 위 응답 비교·분배 대상에서 제외.
+- item handler에 진입한 호출을 집계. health·counter 조회는 집계하지 않으며, backend 재시작 시 0으로 초기화.
 - Swagger UI·ReDoc·OpenAPI 경로 비활성화.
 
 ## 검증 역할
@@ -55,6 +57,8 @@
 - 신뢰하는 합성 문맥을 명시한 기본 비교 테스트: `same`·일반 item·`different`·`missing` 모두 응답 구조가 달라 `different`, 예상 밖 500인 `error`는 `execution_error` 확인.
 - 별도 필드 매핑 비교 테스트: v2의 `/result/id`·`/result/name`을 `/id`·`/name`으로 매핑하고 공통 응답 메타데이터·매핑 후 빈 `result` 래퍼를 비교에서 제외. `same`은 `matched`, `different`는 `different` 확인.
 - 필드 매핑은 해당 테스트의 비교 정책에만 적용. 데모 실행 설정과 사용자에게 전달하는 본문은 변경하지 않음.
-- 일반 Proxy CLI: 데이터·권한 문맥 미설정으로 정상·예상 404 응답 쌍은 `not_comparable`. 합성 데이터라는 이유만으로 비교 가능하다고 판단하지 않음.
+- 일반 Proxy CLI: 데이터·권한 문맥 미설정으로 정상 응답 쌍은 `not_comparable`. 합성 데이터라는 이유만으로 비교 가능하다고 판단하지 않음.
+- 환경변수 기본 계약의 404는 `not_comparable`·`contract_class_unknown`. 고급 JSON 예시에서 예상 거부로 등록한 404는 `not_comparable`·`authorization_context_unknown`.
+- 500은 두 설정 모두 `execution_error`·`unexpected_api_error`.
 
 관련 문서: [Docker 주소·실행](../runtime/README.md), [Proxy 전환](../proxy/README.md), [로컬 검증](../validation/README.md).
