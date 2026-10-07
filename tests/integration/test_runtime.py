@@ -30,6 +30,61 @@ def pipeline(harness, step):
     return harness.metrics.value("comparison_pipeline_total", route="catalog", step=step)
 
 
+@pytest.mark.parametrize("method", ["delete", "head", "MiXeD", "DELETE"])
+async def test_unregistered_http_method_case_is_preserved_through_real_server(
+    backend_factory, runtime_factory, respond, method
+):
+    async def backend(request, writer):
+        if request.method == b"DELETE":
+            await respond(writer, body=b"", status=204)
+        else:
+            await respond(writer, body=b"method not implemented", status=501)
+
+    v1, v2 = await backend_factory(backend), await backend_factory()
+    harness = await runtime_factory(v1, v2)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(harness.runtime),
+            host="127.0.0.1",
+            port=port,
+            http="h11",
+            access_log=False,
+            proxy_headers=False,
+            log_config=None,
+        )
+    )
+    task = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        await eventually(lambda: server.started)
+        async with asyncio.timeout(2):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                writer.write(
+                    method.encode("ascii") + b" /catalog/1 HTTP/1.1\r\nHost: proxy.local\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                response = await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        assert [request.method for request in v1.requests] == [method.encode("ascii")]
+        assert response.split(b"\r\n", 1)[0].split()[1] == (
+            b"204" if method == "DELETE" else b"501"
+        )
+        assert response.partition(b"\r\n\r\n")[2] == (
+            b"" if method == "DELETE" else b"method not implemented"
+        )
+        assert not v2.requests
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, 3)
+        listener.close()
+
+
 async def test_identity_provider_failure_returns_private_503_without_backend_calls(
     backend_factory, runtime_factory, caplog, monkeypatch
 ):

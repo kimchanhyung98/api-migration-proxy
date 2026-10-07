@@ -123,6 +123,7 @@ class BackendTransport:
             content=body,
             extensions={"timeout": dict(self._timeout), "target": target.encode("ascii")},
         )
+        request.method = method
         with _private_http_logs():
             response = await self._transport.handle_async_request(request)
         assert isinstance(response.stream, httpx.AsyncByteStream)
