@@ -1,1 +1,1 @@
-"""HTTP API migration execution and observation."""
+"""HTTP API 마이그레이션 실행 및 관측."""

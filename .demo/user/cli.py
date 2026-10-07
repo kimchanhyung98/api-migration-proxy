@@ -1,3 +1,5 @@
+"""프록시 순차 요청과 응답 비율·오류·지연 집계."""
+
 from __future__ import annotations
 
 import argparse
@@ -72,6 +74,20 @@ def _positive_float(value: str) -> float:
 
 
 def run(url: str, path: str = "/items/different", requests: int = 100, timeout: float = 5) -> dict:
+    """순차 GET 요청으로 응답 백엔드와 지연 집계.
+
+    Args:
+        url: 요청 대상 HTTP 원본 주소.
+        path: 원본 주소에 연결할 요청 경로.
+        requests: 양의 정수 요청 횟수.
+        timeout: 요청 타임아웃(초).
+
+    Returns:
+        응답 건수를 분모로 한 버전 비율과 실패 시도를 포함한 지연 통계.
+
+    Raises:
+        ValueError: URL·경로·요청 횟수·타임아웃 오류.
+    """
     origin, path = _origin(url), _path(path)
     if type(requests) is not int or requests <= 0:
         raise ValueError("requests must be a positive integer")
@@ -132,6 +148,7 @@ def run(url: str, path: str = "/items/different", requests: int = 100, timeout: 
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI 인자로 요청을 실행하고 JSON 결과 출력·선택적 파일 저장."""
     parser = argparse.ArgumentParser(description="Send sequential requests to the migration proxy.")
     parser.add_argument("--url", required=True)
     parser.add_argument("--path", default="/items/different")

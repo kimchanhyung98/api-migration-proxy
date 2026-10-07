@@ -1,3 +1,5 @@
+"""응답 표본의 v2 분배 비율과 오류 여부 검증."""
+
 from __future__ import annotations
 
 import math
@@ -5,6 +7,7 @@ from decimal import Decimal
 
 
 def validate_parameters(requests: int, v2_ratio: float, tolerance: float) -> None:
+    """요청 수·v2 비율·허용 오차 검증. 위반 시 ValueError 발생."""
     if type(requests) is not int or requests <= 0:
         raise ValueError("requests must be a positive integer")
     for name, value in (("v2_ratio", v2_ratio), ("tolerance", tolerance)):
@@ -34,6 +37,20 @@ def _validate_report(report: dict) -> None:
 
 
 def evaluate(report: dict, *, requests: int, v2_ratio: float, tolerance: float) -> dict:
+    """User 집계 결과를 기대 응답 분배와 비교.
+
+    Args:
+        report: User CLI의 요청 결과 집계.
+        requests: 예정한 총 요청 수.
+        v2_ratio: 기대 v2 응답 비율.
+        tolerance: 비율 허용 오차. 목표 비율 0 또는 1에서는 무시.
+
+    Returns:
+        통과 여부·실패 사유·기대 범위·관측값.
+
+    Raises:
+        ValueError: 매개변수 또는 보고서 집계 형식 오류.
+    """
     validate_parameters(requests, v2_ratio, tolerance)
     _validate_report(report)
     if v2_ratio in {0, 1}:

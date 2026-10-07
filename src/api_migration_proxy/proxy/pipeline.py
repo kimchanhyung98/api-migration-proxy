@@ -1,3 +1,5 @@
+"""응답 캡처의 비교·상세 마스킹·수집 전달 작업 관리."""
+
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +33,8 @@ def _utc() -> str:
 
 @dataclass(frozen=True)
 class WorkLimits:
+    """비교 작업 수·메모리·시간 한도와 관측 식별자."""
+
     compare_max_jobs: int
     compare_max_bytes: int
     compare_max_age_seconds: float
@@ -72,7 +76,7 @@ class _ComparisonJob:
 
 
 class ComparisonPipeline:
-    """Own bounded comparison and masking work independently of HTTP request lifetimes."""
+    """HTTP 요청 수명과 독립적으로 비교·마스킹 작업의 자원 한도 관리."""
 
     def __init__(
         self,
@@ -94,6 +98,7 @@ class ComparisonPipeline:
         self._open = False
 
     def start(self) -> None:
+        """비교용 스레드 풀과 비동기 큐 소비 작업 시작."""
         self._pool = ThreadPoolExecutor(
             max_workers=self.limits.compare_workers, thread_name_prefix="comparison"
         )
@@ -103,12 +108,24 @@ class ComparisonPipeline:
         self._open = True
 
     def status(self) -> dict[str, int]:
+        """대기·실행 중인 비교 작업 수와 예약 바이트 반환."""
         return {"comparison_jobs": self._jobs, "comparison_bytes": self._job_bytes}
 
     def _drop(self, reason: str) -> None:
         self.metrics.increment("collection_dropped_total", reason=reason)
 
     def submit(self, summary, v1, v2, policy, context):
+        """작업 수·바이트 한도 내에서 비교 작업 접수.
+
+        종료 상태 또는 한도 초과 시 폐기 사유 집계 후 반환.
+
+        Args:
+            summary: 요청과 두 백엔드 실행 결과를 담은 dict.
+            v1: v1의 BackendResponse.
+            v2: v2의 BackendResponse.
+            policy: 적용할 ComparisonPolicy.
+            context: 비교 가능 근거를 담은 ComparisonContext.
+        """
         if not self._open:
             self._drop("shutdown")
             return
@@ -197,7 +214,7 @@ class ComparisonPipeline:
                 if not done:
                     self._drop("timeout")
                     settled = True
-                    # The thread still owns its input and slot until computation actually ends.
+                    # 시간 초과 뒤에도 실제 계산 종료까지 입력과 작업 슬롯 유지.
                     await asyncio.wait({future})
                     future.result()
                     continue
@@ -244,7 +261,7 @@ class ComparisonPipeline:
                         try:
                             event.summary, event.detail, event.detail_expires_at = future.result()
                         except Exception:
-                            pass  # The already-safe summary retains masking_failed.
+                            pass  # 검증된 요약의 masking_failed 상태 유지.
                     else:
                         detail_pending = True
                 before = self.collector.counters.copy()
@@ -266,7 +283,7 @@ class ComparisonPipeline:
                     self._drop(reason)
                 settled = True
                 if detail_pending:
-                    # The safe summary is submitted, but this slot still owns the raw detail task.
+                    # 요약 접수 후에도 원본 상세 작업이 끝날 때까지 슬롯 유지.
                     try:
                         await asyncio.wait({future})
                         future.result()
@@ -294,25 +311,33 @@ class ComparisonPipeline:
                 self._jobs -= 1
                 self._job_bytes -= job.size
                 self._queue.task_done()
-                # Idle workers must not retain completed captures or exception tracebacks.
+                # 유휴 작업자에 완료된 캡처와 예외 traceback 참조가 남지 않도록 해제.
                 del job
                 future = None
                 done = _pending = set()
                 result = event = None
 
     async def flush(self) -> None:
+        """접수한 비교·마스킹 작업이 큐에서 모두 정리될 때까지 대기."""
         await self._queue.join()
 
     async def close(self, deadline: float) -> None:
+        """접수를 중지하고 기한 내 큐와 작업자 정리.
+
+        기한 후에도 실행 중인 CPU 작업은 완료 시점까지 자원 점유 추적.
+
+        Args:
+            deadline: 종료 대기 기한의 단조 시각.
+        """
         self._open = False
         try:
             async with asyncio.timeout(max(0, deadline - time.monotonic())):
                 await self._queue.join()
         except TimeoutError:
-            pass  # Each unfinished job accounts for its own terminal outcome below.
+            pass  # 아래 종료 처리에서 미완료 작업별 최종 결과 집계.
         for worker in self._workers:
             worker.cancel()
-        # Cancellation does not release a running CPU job. Unfinished workers stay tracked.
+        # 취소로 CPU 작업이 중단되지는 않으므로 미완료 작업자 추적 유지.
         if self._workers:
             await asyncio.wait(self._workers, timeout=max(0, deadline - time.monotonic()))
         while not self._queue.empty():

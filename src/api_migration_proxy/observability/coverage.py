@@ -1,4 +1,4 @@
-"""Explicit request-cohort coverage and pipeline accounting."""
+"""명시적 요청 코호트의 처리 단계 및 비교 커버리지 집계."""
 
 from __future__ import annotations
 
@@ -11,11 +11,27 @@ from .metrics import STEPS
 
 @dataclass(frozen=True)
 class Ratio:
+    """집계 비율과 known·unknown·no_data·ended 상태."""
+
     value: float | None
     state: str
 
 
 def ratio(numerator, denominator, *, complete=True, planned_end=False):
+    """집계 완전성과 분모 상태를 반영한 비율 계산.
+
+    Args:
+        numerator: 분자 건수(int). None이면 미확인.
+        denominator: 분모 건수(int). None이면 미확인.
+        complete: 집계 완전성 확인 여부(bool).
+        planned_end: 비교가 계획대로 종료되었는지 여부(bool).
+
+    Returns:
+        비율과 상태를 담은 Ratio.
+
+    Raises:
+        ValueError: 완전한 집계의 건수가 음수·비정수이거나 분자가 분모 초과.
+    """
     if not complete or numerator is None or denominator is None:
         return Ratio(None, "unknown")
     if (
@@ -31,7 +47,7 @@ def ratio(numerator, denominator, *, complete=True, planned_end=False):
 
 
 class CohortWindow:
-    """An explicitly selected start-time population, never reconstructed from storage."""
+    """요청 시작 시각으로 지정한 관측 집단. 저장 이벤트로 모집단 재구성 금지."""
 
     def __init__(self, route_id, epoch, start, end, *, planned_end=False):
         if (
@@ -51,6 +67,7 @@ class CohortWindow:
         self._lock = threading.RLock()
 
     def begin(self, metrics, *, route_id, epoch, started_at):
+        """라우트·에포크·시작 시각을 확인하고 코호트에 요청 관측 등록."""
         observation = PipelineObservation(metrics, route_id, cohort=self)
         with self._lock:
             if (
@@ -64,16 +81,19 @@ class CohortWindow:
         return observation
 
     def mark_unknown(self):
+        """관측 누락으로 코호트 집계의 완전성 미확인 처리."""
         with self._lock:
             self.complete = False
 
     def close(self, now):
+        """시간 구간이 끝나고 모든 요청 관측이 마감된 코호트 종료."""
         with self._lock:
             if not math.isfinite(now) or now < self.end or self.pending:
                 raise ValueError("cohort still has an open time interval or unsettled requests")
             self.closed = True
 
     def report(self):
+        """단계별 건수·분모별 비율과 잠정·종료·미확인 상태 반환."""
         with self._lock:
             c = dict(self.counts)
             known = self.complete
@@ -100,6 +120,8 @@ class CohortWindow:
 
 
 class PipelineObservation:
+    """요청 하나의 단계 전이와 최종 저장 결과 추적."""
+
     def __init__(self, metrics, route_id, *, cohort=None):
         metrics._key("comparison_pipeline_total", {"route": route_id, "step": "eligible"})
         self.metrics, self.route_id, self.cohort = metrics, route_id, cohort
@@ -138,6 +160,7 @@ class PipelineObservation:
         return self._advance("T", "D")
 
     def compared(self, result, comparison_class="unavailable", reason="none"):
+        """실행 종료 상태를 검증하고 비교 판정을 한 번만 확정."""
         with self._lock:
             if self._result is not None:
                 if self._result != (result, comparison_class, reason):
@@ -173,13 +196,24 @@ class PipelineObservation:
             return True
 
     def stored(self):
+        """비교 결과 확정 후 저장 ACK를 한 번만 집계."""
         with self._lock:
             if self._result is None:
                 raise ValueError("storage confirmation requires a finalized event")
             return self._advance("W", "S")
 
     def finish(self, *, dropped=False, acknowledgement_unknown=False):
-        """Release accounting only after final ACK, confirmed drop, or no selection."""
+        """요청 관측을 마감하고 코호트의 미완료 건수 해제.
+
+        저장 확인·확정 폐기·미선택 시 마감 가능. 결과 불명 시 코호트 완전성 미확인 처리.
+
+        Args:
+            dropped: 폐기가 확정되었는지 여부(bool).
+            acknowledgement_unknown: 저장 ACK 등 종료 결과가 불명인지 여부(bool).
+
+        Raises:
+            ValueError: 종료·저장 확인 없이 선택된 관측을 마감하려는 경우.
+        """
         with self._lock:
             if self._finished:
                 return

@@ -1,3 +1,5 @@
+"""환경 변수 로딩과 기본 실행·라우팅 설정 구성."""
+
 from __future__ import annotations
 
 import hashlib
@@ -29,6 +31,17 @@ from api_migration_proxy.settings import Settings, load_settings
 
 
 def read_environment(path: str | Path = ".env") -> dict[str, str]:
+    """파일과 프로세스에서 API_PROXY_ 설정 병합.
+
+    Args:
+        path: 환경 파일 경로. 파일이 없으면 프로세스 환경만 사용.
+
+    Returns:
+        프로세스 환경 변수를 우선 적용한 설정 사전.
+
+    Raises:
+        ConfigurationError: 환경 파일의 구문·명시적 값·인코딩 오류 또는 읽기 실패.
+    """
     values: dict[str, str] = {}
     try:
         with Path(path).open(encoding="utf-8") as stream:
@@ -94,6 +107,8 @@ def _retention_batch_size(value: str) -> int:
 
 @dataclass(frozen=True)
 class RunOptions:
+    """리스너, 이벤트 저장소 및 보존 작업 실행 옵션."""
+
     host: str
     port: int
     event_store: str
@@ -160,6 +175,17 @@ class RunOptions:
 
 
 def load_run_options(environment: Mapping[str, str]) -> RunOptions:
+    """환경 설정에서 검증된 실행 옵션 생성.
+
+    Args:
+        environment: API_PROXY_ 접두사의 환경 설정.
+
+    Returns:
+        리스너·저장소·보존 작업 실행 옵션.
+
+    Raises:
+        ConfigurationError: 옵션 형식 또는 허용 범위 위반.
+    """
     return RunOptions(
         host=environment.get("API_PROXY_HOST", "127.0.0.1"),
         port=_port(environment.get("API_PROXY_PORT", "8080")),
@@ -180,6 +206,17 @@ def load_run_options(environment: Mapping[str, str]) -> RunOptions:
 
 
 def load_proxy_settings(environment: Mapping[str, str]) -> Settings:
+    """지정 JSON 또는 환경 변수로 프록시 설정 생성.
+
+    Args:
+        environment: API_PROXY_CONFIG와 기본 프록시 환경 설정.
+
+    Returns:
+        라우팅·비교·수집 정책을 포함한 설정.
+
+    Raises:
+        ConfigurationError: 설정 로딩 실패 또는 필수 라우트·shadow 검토 근거 누락.
+    """
     if config := environment.get("API_PROXY_CONFIG", ""):
         try:
             return load_settings(config)

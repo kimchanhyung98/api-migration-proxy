@@ -1,3 +1,5 @@
+"""단계별 실행·종료·이벤트 저장과 이전 기록 보존 검증."""
+
 from __future__ import annotations
 
 
@@ -10,6 +12,22 @@ def evaluate_observations(
     shadow_enabled: bool,
     previous_events: list | tuple = (),
 ) -> dict:
+    """실제 실행 증거와 저장 이벤트를 단계 기대값에 대조.
+
+    Args:
+        observation: 상태 확인·종료 결과·전후 백엔드 요청 수.
+        events: 현재 저장된 전체 이벤트.
+        revision: 현재 단계에서 기대하는 설정 리비전.
+        backend_counts: User CLI가 받은 v1·v2 응답 수.
+        shadow_enabled: 현재 단계의 shadow 활성화 여부.
+        previous_events: 이전 단계에서 보존을 확인한 이벤트.
+
+    Returns:
+        실행·저장 검증 결과와 실패 사유.
+
+    Raises:
+        ValueError: 응답 건수·리비전·shadow 상태 오류.
+    """
     counts = {backend: backend_counts.get(backend, -1) for backend in ("v1", "v2")}
     if any(type(value) is not int or value < 0 for value in counts.values()):
         raise ValueError("backend counts must be nonnegative integers")

@@ -1,3 +1,5 @@
+"""저장용 이벤트의 필드 제한, 상세 마스킹 및 보존 기한 설정."""
+
 from __future__ import annotations
 
 import json
@@ -124,6 +126,8 @@ def _summary(source: Mapping[str, Any], allowed_paths: frozenset[str]) -> dict[s
 
 @dataclass(frozen=True)
 class DetailPolicy:
+    """승인 필드만 대상으로 하는 상세 표본·마스킹·보존 정책."""
+
     ratio: float = 0
     max_bytes: int = 0
     retention_seconds: float = 0
@@ -180,6 +184,8 @@ def _detail(
 
 @dataclass
 class _DeliveryState:
+    """이벤트 복사본 간 재접수 방지를 위해 공유하는 제출 상태."""
+
     submitted: bool = False
 
     def __deepcopy__(self, memo: dict[int, object]) -> _DeliveryState:
@@ -188,6 +194,8 @@ class _DeliveryState:
 
 @dataclass
 class CollectionEvent:
+    """검증된 요약·선택적 상세와 각각의 보존 기한."""
+
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()), init=False)
     created_at: float
     summary_expires_at: float
@@ -209,6 +217,24 @@ def make_event(
     work_started_at: float | None = None,
     sample: Callable[[], float] = random.random,
 ) -> CollectionEvent:
+    """요약 필드 제한과 상세 마스킹을 거쳐 수집 이벤트 생성.
+
+    Args:
+        summary: 요청·실행·비교 결과를 담은 요약 원본.
+        retention_seconds: 요약 보존 기간(초).
+        detail_policy: 상세 수집 정책. None이면 상세 수집 비활성화.
+        details: 마스킹 전 상세 필드.
+        allowed_difference_paths: 요약에 기록을 허용한 차이 경로.
+        now: 생성 시각의 Unix 타임스탬프. None이면 현재 시각.
+        work_started_at: 전체 작업 시작 시점의 단조 시각. None이면 현재 시각.
+        sample: 상세 표본 선택에 사용할 난수 함수.
+
+    Returns:
+        저장 가능한 필드와 보존 기한을 갖춘 이벤트.
+
+    Raises:
+        ValueError: 보존 기간 또는 생성 시각 오류.
+    """
     if not _finite(retention_seconds) or retention_seconds <= 0:
         raise ValueError("invalid_summary_retention")
     created = time.time() if now is None else now

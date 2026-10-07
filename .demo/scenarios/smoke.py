@@ -1,3 +1,5 @@
+"""실행 중 데모의 HTTP 응답 보존과 SQLite 저장 확인."""
+
 import argparse
 import json
 import sqlite3
@@ -9,6 +11,16 @@ import httpx
 
 
 def check(url: str, event_store: str, serving: str = "v1") -> None:
+    """정상·누락·오류 응답과 양쪽 백엔드의 이벤트 저장 확인.
+
+    Args:
+        url: 실행 중인 데모 프록시 원본 주소.
+        event_store: 데모 SQLite 저장 파일 경로.
+        serving: 응답을 제공할 것으로 기대하는 v1 또는 v2.
+
+    Raises:
+        AssertionError: 기대 응답·역할 불일치 또는 제한 시간 내 이벤트 미저장.
+    """
     assert serving in {"v1", "v2"}, "serving must be v1 or v2"
     shadow = "v2" if serving == "v1" else "v1"
     started = time.time()

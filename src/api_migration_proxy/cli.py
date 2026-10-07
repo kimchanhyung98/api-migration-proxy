@@ -1,3 +1,5 @@
+"""설정 검사, 프록시 실행 및 만료 이벤트 삭제 명령."""
+
 from __future__ import annotations
 
 import argparse
@@ -58,6 +60,7 @@ async def _purge_events(options: RunOptions, batch_size: int) -> dict[str, int]:
 
 
 def _explain(settings: Settings, options: RunOptions, *, json_mode: bool) -> dict:
+    """백엔드 연결 검사 없이 설정상 동작과 런타임 제약 요약."""
     routes = []
     for route in settings.snapshot.routes:
         request_cohort = route.cohort.mode == "request"
@@ -105,6 +108,14 @@ def _explain(settings: Settings, options: RunOptions, *, json_mode: bool) -> dic
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI 인자와 환경 설정에 따른 명령 실행.
+
+    Args:
+        argv: 명령 인자 목록. None이면 프로세스 인자 사용.
+
+    Returns:
+        정상 종료 시 0, 설정·실행·삭제 실패 시 2, 제어 리스너 모드의 서버 시작 실패 시 3.
+    """
     parser = argparse.ArgumentParser(description="HTTP API migration proxy")
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser(

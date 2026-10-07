@@ -1,3 +1,5 @@
+"""v1·v2 응답 계약과 요청 건수를 제공하는 합성 백엔드."""
+
 import asyncio
 from http import HTTPStatus
 
@@ -7,6 +9,7 @@ from starlette.exceptions import HTTPException
 
 
 def create_app(version: str) -> FastAPI:
+    """지정 버전의 정상·누락·오류 응답과 관측용 경로를 가진 앱 생성."""
     if version not in {"v1", "v2"}:
         raise ValueError("version must be v1 or v2")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)

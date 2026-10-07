@@ -1,3 +1,5 @@
+"""Docker 응답 분배 검증 명령의 진입점."""
+
 import argparse
 
 from scenarios.distribution import validate_parameters
@@ -5,6 +7,7 @@ from scenarios.runner import Stage, handle_termination, run_stages
 
 
 def run(*, requests: int, v2_ratio: float, tolerance: float) -> int:
+    """단일 분배 검증 단계 실행 후 종료 코드 반환."""
     return run_stages(
         "distribution",
         (Stage("distribution", requests, v2_ratio, tolerance=tolerance),),
@@ -13,6 +16,7 @@ def run(*, requests: int, v2_ratio: float, tolerance: float) -> int:
 
 
 def main() -> int:
+    """CLI 인자 검증 후 Docker 분배 시나리오 실행."""
     parser = argparse.ArgumentParser(
         description="Run an isolated Docker serving distribution check"
     )

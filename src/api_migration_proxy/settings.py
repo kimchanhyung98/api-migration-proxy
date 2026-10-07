@@ -1,3 +1,5 @@
+"""JSON 실행 설정 로딩과 정책 간 참조 검증."""
+
 from __future__ import annotations
 
 import json
@@ -21,6 +23,8 @@ from api_migration_proxy.routing.configuration import ConfigurationError, Snapsh
 
 @dataclass(frozen=True)
 class Settings:
+    """라우팅 스냅샷, 비교 정책 및 작업·수집 한도."""
+
     snapshot: Snapshot
     comparison_policies: Mapping[str, ComparisonPolicy]
     work_limits: WorkLimits
@@ -65,6 +69,17 @@ def _comparison_policy(value: object) -> ComparisonPolicy:
 
 
 def load_settings(path: str | Path) -> Settings:
+    """JSON 설정을 검증하고 실행 설정으로 변환.
+
+    Args:
+        path: 네 설정 영역을 포함한 JSON 파일 경로.
+
+    Returns:
+        정책 참조와 자원 한도를 검증한 설정.
+
+    Raises:
+        ConfigurationError: 파일 읽기, JSON 형식 또는 설정 검증 실패.
+    """
     try:
         document = Path(path).read_text(encoding="utf-8")
         data = json.loads(
@@ -83,7 +98,7 @@ def load_settings(path: str | Path) -> Settings:
         if not isinstance(data["comparison_policies"], list):
             raise ConfigurationError("comparison policies must be an array")
         policies: dict[str, ComparisonPolicy] = {}
-        # Preserve decimal rules without changing numeric types in runtime budgets.
+        # 실행 한도의 숫자 타입은 유지하고 비교 규칙의 소수 정밀도만 보존.
         for value in json.loads(document, parse_float=Decimal)["comparison_policies"]:
             policy = _comparison_policy(value)
             if policy.revision in policies:
@@ -116,6 +131,7 @@ def load_settings(path: str | Path) -> Settings:
 
 
 def metrics_from_settings(settings: Settings) -> Metrics:
+    """등록 라우트와 허용 사유 코드만 수용하는 지표 집계기 생성."""
     return Metrics(
         {route.route_id for route in settings.snapshot.routes} | {"unregistered"},
         reason_codes=DEFAULT_REASONS | REASON_CODES,

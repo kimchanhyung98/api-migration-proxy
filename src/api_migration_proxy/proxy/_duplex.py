@@ -1,3 +1,5 @@
+"""요청 업로드 중 조기 응답을 수신하기 위한 HTTP/1.1 전송 확장."""
+
 import asyncio
 
 import httpcore
@@ -5,7 +7,7 @@ import httpx
 
 
 class _HTTP11Connection(httpcore.AsyncHTTP11Connection):
-    # These overrides depend on the pinned HTTPcore 1.0.9 lifecycle.
+    # 고정 버전 HTTPcore 1.0.9의 연결 수명 주기에 의존하는 재정의.
     _upload: asyncio.Task[None] | None = None
 
     async def _send_request_body(self, request: httpcore.Request) -> None:
@@ -26,7 +28,7 @@ class _HTTP11Connection(httpcore.AsyncHTTP11Connection):
             try:
                 self._upload.result()
             except httpcore.WriteError:
-                # A backend may close its input and still return a valid response.
+                # 백엔드가 요청 입력을 닫아도 유효한 응답 반환 가능.
                 pass
             return await receive
         finally:
@@ -45,7 +47,7 @@ class _HTTP11Connection(httpcore.AsyncHTTP11Connection):
             try:
                 await asyncio.gather(upload, return_exceptions=True)
             except asyncio.CancelledError:
-                # Finish socket/pool cleanup even when its caller is cancelled again.
+                # 호출자가 재차 취소되어도 소켓·연결 풀 정리 완료까지 대기.
                 pass
         if not upload.cancelled():
             upload.exception()
@@ -55,7 +57,7 @@ class _HTTP11Connection(httpcore.AsyncHTTP11Connection):
         if await self._stop_upload():
             await super()._response_closed()
         else:
-            # h11 can mark DONE before the final socket write has completed.
+            # h11의 DONE 상태가 마지막 소켓 쓰기 완료보다 먼저 표시될 수 있음.
             await self.aclose()
 
     async def aclose(self) -> None:
@@ -65,7 +67,7 @@ class _HTTP11Connection(httpcore.AsyncHTTP11Connection):
             try:
                 await asyncio.shield(closing)
             except asyncio.CancelledError:
-                # HTTPcore still has to remove this request from its pool.
+                # HTTPcore의 연결 풀에서 해당 요청을 제거하는 후속 정리 필요.
                 pass
         closing.result()
 
@@ -103,8 +105,10 @@ class _ConnectionPool(httpcore.AsyncConnectionPool):
 
 
 class DuplexHTTPTransport(httpx.AsyncHTTPTransport):
+    """업로드와 응답 헤더 수신을 병행하는 HTTPX 전송기."""
+
     def __init__(self, max_connections: int) -> None:
-        # HTTPX 0.28.1 delegates transport operations to this pool without buffering.
+        # HTTPX 0.28.1이 버퍼링 없이 이 풀에 전송 작업 위임.
         self._pool = _ConnectionPool(
             ssl_context=httpx.create_ssl_context(verify=True, trust_env=False),
             max_connections=max_connections,

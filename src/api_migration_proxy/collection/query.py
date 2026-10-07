@@ -1,3 +1,5 @@
+"""이벤트 조회 조건과 접근 범위 정의."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +9,8 @@ from .events import _finite
 
 @dataclass(frozen=True)
 class QueryAccess:
+    """조회 허용 라우트·기간·행 수 및 상세 접근 권한."""
+
     routes: frozenset[str]
     max_rows: int
     max_period_seconds: float
@@ -25,6 +29,8 @@ class QueryAccess:
 
 @dataclass(frozen=True)
 class EventQuery:
+    """시작 포함·종료 제외 시간 구간과 이벤트 필터."""
+
     start: float
     end: float
     routes: frozenset[str]

@@ -1,3 +1,5 @@
+"""격리된 Docker Compose 환경에서 단계별 마이그레이션 검증."""
+
 from __future__ import annotations
 
 import json
@@ -17,6 +19,8 @@ from scenarios.observation import evaluate_observations
 
 @dataclass(frozen=True)
 class Stage:
+    """요청 수, v2 비율 및 shadow 상태로 정의한 검증 단계."""
+
     name: str
     requests: int
     v2_ratio: float
@@ -119,6 +123,19 @@ def _summarize(scenario: str, validations: list[dict], failures: list[str]) -> s
 
 
 def run_stages(scenario: str, stages: tuple[Stage, ...], *, distribution: bool = False) -> int:
+    """단계별 설정 적용·요청·종료·저장 검증과 결과 보관.
+
+    Args:
+        scenario: 실행 및 결과 식별에 사용할 시나리오 이름.
+        stages: 순서대로 실행할 검증 단계.
+        distribution: 단일 분배 검증용 결과 형식 사용 여부.
+
+    Returns:
+        전체 검증과 자체 Compose 자원 정리 성공 시 0, 실패 시 1.
+
+    Raises:
+        ValueError: 단계별 요청 수·비율·허용 오차 오류.
+    """
     for stage in stages:
         validate_parameters(stage.requests, stage.v2_ratio, stage.tolerance)
     demo = Path(__file__).resolve().parents[1]
@@ -242,6 +259,7 @@ def run_stages(scenario: str, stages: tuple[Stage, ...], *, distribution: bool =
                             ["run", "--rm", "--no-deps", "user"], stdout=report_file, timeout=600
                         )
                     report = json.loads((stage_output / "report.json").read_text())
+                    # 프록시 종료로 비교·수집 작업을 정리한 뒤 저장 결과 확인.
                     execute(["stop", "--timeout", "15", "proxy"], timeout=30)
                     container_id = execute(
                         ["ps", "--all", "--quiet", "proxy"], stdout=subprocess.PIPE, timeout=30
@@ -338,6 +356,8 @@ def run_stages(scenario: str, stages: tuple[Stage, ...], *, distribution: bool =
 
 
 def handle_termination() -> None:
+    """SIGTERM을 KeyboardInterrupt로 변환하여 기존 종료 정리 경로 실행."""
+
     def interrupted(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt
 

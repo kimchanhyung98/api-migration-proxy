@@ -1,3 +1,5 @@
+"""요청 전달과 shadow·비교·수집 작업의 수명 및 자원 관리."""
+
 from __future__ import annotations
 
 import asyncio
@@ -36,14 +38,18 @@ def _utc() -> str:
 
 
 class ClientDisconnected(Exception):
+    """요청 처리 중 확인된 클라이언트 연결 종료."""
+
     pass
 
 
 class IncompleteResponse(Exception):
-    """The response has started and must be terminated without a replacement body."""
+    """이미 시작한 응답을 대체 본문 없이 중단해야 하는 상태."""
 
 
 class _Input:
+    """ASGI 요청 본문 소비와 연결 종료 상태 관리."""
+
     def __init__(self, receive: Callable):
         self.receive = receive
         self.done = asyncio.Event()
@@ -86,6 +92,8 @@ async def _body(data: bytes):
 
 @dataclass
 class _Attempt:
+    """백엔드 한 번의 실행 상태와 제한된 응답 캡처."""
+
     backend: str
     role: str
     outcome: str = "not_dispatched"
@@ -131,6 +139,8 @@ class _Attempt:
 
 
 class ProxyRuntime:
+    """serving·shadow 실행을 분리하고 비교·수집 자원 한도를 관리하는 ASGI 앱."""
+
     def __init__(
         self,
         config: ConfigManager,
@@ -208,6 +218,7 @@ class ProxyRuntime:
         return self._accepting and self.config.current is not None
 
     def observation_status(self) -> dict:
+        """현재 프로세스의 설정·수집·실행 상태 반환."""
         return {
             "worker_revisions": dict(self.config.worker_status),
             "collection": self.collector.metrics(),
@@ -220,6 +231,7 @@ class ProxyRuntime:
         }
 
     def metric_snapshot(self) -> MetricSnapshot:
+        """요청 지표에 수집 큐와 저장소 보존 작업 지표를 합쳐 반환."""
         snapshot = self.metrics.snapshot()
         collection = self.collector.metrics()
         counters, gauges = dict(snapshot.counters), dict(snapshot.gauges)
@@ -232,6 +244,12 @@ class ProxyRuntime:
         return MetricSnapshot(counters, gauges, snapshot.histograms)
 
     async def start(self) -> None:
+        """초기 설정 검증 후 전송·비교·보존 작업 시작.
+
+        Raises:
+            ConfigurationError: 초기 스냅샷 부재 또는 런타임 정책 불일치.
+            RuntimeError: 종료된 런타임 재시작 시도.
+        """
         if self._close_task is not None:
             raise RuntimeError("runtime is closed")
         if self._accepting:
@@ -257,12 +275,14 @@ class ProxyRuntime:
         self.metrics.increment("collection_dropped_total", reason=reason)
 
     async def flush(self):
+        """진행 중 응답 쌍의 비교와 수집 작업 완료 대기."""
         if self._pairs:
             await asyncio.gather(*tuple(self._pairs))
         await self._comparison.flush()
         await self.collector.flush()
 
     async def close(self):
+        """공유 종료 작업을 만들고 호출자 취소로부터 보호하며 대기."""
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         await asyncio.shield(self._close_task)
@@ -299,6 +319,7 @@ class ProxyRuntime:
     async def _attempt(
         self, attempt, snapshot, match, scope, body, selected, messages=None, input_done=None
     ):
+        """백엔드 요청 실행과 응답 전달·캡처·종료 결과 기록."""
         route_id = match.route.route_id if match else "unregistered"
         role = attempt.role
         budgets = snapshot.budgets
@@ -487,6 +508,7 @@ class ProxyRuntime:
             self._active.discard(task)
 
     async def _request(self, snapshot, scope, receive, send):
+        """요청별 스냅샷으로 배정하고 shadow·비교 작업 연결."""
         started, started_at, request_id = time.monotonic(), _utc(), str(uuid.uuid4())
         match = match_route(snapshot, scope["method"], scope["path"])
         route = match.route if match else None
@@ -549,6 +571,7 @@ class ProxyRuntime:
                     return
 
         async def dispatch_shadow():
+            # 요청 본문을 끝까지 확보한 경우에만 shadow로 재전송.
             await source.done.wait()
             if source.oversized:
                 shadow.reason = "request_oversized"
@@ -596,6 +619,7 @@ class ProxyRuntime:
                 if self._shadow_slots >= snapshot.budgets.shadow_max_inflight:
                     shadow.reason = "slot_exhausted"
                 else:
+                    # 본문 캡처 전에 슬롯을 예약하여 대기 중인 요청의 메모리도 제한.
                     self._shadow_slots += 1
                     reserved = True
                     source.capture_limit = snapshot.budgets.request_capture_limit_bytes
@@ -750,6 +774,7 @@ class ProxyRuntime:
                         if reserved:
                             self._shadow_slots -= 1
 
+                # 클라이언트 응답 종료 후에도 shadow 결과와 비교 접수까지 추적.
                 pair = asyncio.create_task(finalize())
                 self._pairs.add(pair)
                 pair.add_done_callback(self._pairs.discard)

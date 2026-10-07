@@ -1,3 +1,5 @@
+"""공개·제어 소켓을 사용하는 프록시 서버 실행."""
+
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -11,6 +13,7 @@ from api_migration_proxy.proxy.runtime import ProxyRuntime
 
 
 def run_server(runtime: ProxyRuntime, options: RunOptions) -> int:
+    """실행 옵션에 따라 소켓을 바인딩하고 서버 종료 시 정리."""
     snapshot = runtime.config.current
     assert snapshot is not None
     server_options: dict[str, Any] = {

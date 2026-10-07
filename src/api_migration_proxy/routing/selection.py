@@ -1,3 +1,5 @@
+"""요청 라우트 매칭, 코호트 배정 및 원본 경로 보존."""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +12,8 @@ from .configuration import Cohort, Route, Snapshot, template_parts
 
 @dataclass(frozen=True)
 class RouteMatch:
+    """매칭된 라우트와 변경 불가능한 경로 매개변수."""
+
     route: Route
     parameters: Mapping[str, str]
 
@@ -19,12 +23,15 @@ class RouteMatch:
 
 @dataclass(frozen=True)
 class Assignment:
+    """응답 백엔드 배정 결과, 선택 사유 및 해시 구간 값."""
+
     backend: str
     reason: str
     bucket: float | None
 
 
 def match_route(snapshot: Snapshot, method: str, path: str) -> RouteMatch | None:
+    """메서드 대소문자와 경로 세그먼트가 일치하는 라우트 반환. 미등록은 None."""
     request_parts = tuple(path.split("/"))
     for route in snapshot.routes:
         parts = template_parts(route.path_template)
@@ -42,6 +49,7 @@ def match_route(snapshot: Snapshot, method: str, path: str) -> RouteMatch | None
 
 
 def cohort_bucket(cohort: Cohort, key: str) -> float:
+    """코호트 키를 결정적인 [0, 1) 구간 값으로 변환."""
     if not isinstance(key, str) or not key:
         raise ValueError("cohort key must be a nonempty string")
     digest = hashlib.sha256()
@@ -49,7 +57,7 @@ def cohort_bucket(cohort: Cohort, key: str) -> float:
         encoded = value.encode("utf-8")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
-    # 53 bits avoid rounding the largest 256-bit digest up to a bucket of 1.
+    # 최댓값이 1로 반올림되지 않도록 53비트만 사용.
     return (int.from_bytes(digest.digest()[:8], "big") >> 11) / 2**53
 
 
@@ -59,6 +67,16 @@ def choose_serving(
     trusted_identity: Mapping[str, str] | None = None,
     request_key: str | None = None,
 ) -> Assignment:
+    """코호트 정책에 따라 응답 백엔드 배정.
+
+    Args:
+        route: 대상 라우트의 전환·코호트 정책.
+        trusted_identity: 검증된 사용자·세션·테넌트 식별자.
+        request_key: 요청 단위 코호트의 독립 키.
+
+    Returns:
+        백엔드·사유·구간 값을 담은 배정 결과. 전환 비활성화 또는 키 부재 시 v1.
+    """
     if not route.rollout_enabled:
         return Assignment("v1", "rollout_disabled", None)
     cohort = route.cohort
@@ -81,6 +99,21 @@ def backend_url(
     raw_path: bytes,
     query_string: bytes = b"",
 ) -> str:
+    """원본 인코딩을 유지하여 백엔드 URL 구성.
+
+    Args:
+        snapshot: 기본 v1 원본 주소를 포함한 설정.
+        match: 매칭 결과. None이면 기본 v1 사용.
+        backend: 대상 백엔드 v1 또는 v2.
+        raw_path: ASCII로 인코딩된 원본 요청 경로.
+        query_string: 선행 물음표를 제외한 ASCII 원본 쿼리.
+
+    Returns:
+        필요한 경로 매핑을 적용한 백엔드 URL.
+
+    Raises:
+        ValueError: 백엔드·원본 경로·쿼리 제약 위반 또는 ASCII 디코딩 실패.
+    """
     if backend not in {"v1", "v2"} or (match is None and backend != "v1"):
         raise ValueError("unregistered requests must use the default v1 backend")
     if (

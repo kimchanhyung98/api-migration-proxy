@@ -1,4 +1,4 @@
-"""Evidence records for manual rollout, propagation, rollback and retirement."""
+"""수동 전환·설정 전파·복구·철수 판단의 근거 검증."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from typing import Mapping
 
 
 class Stage(StrEnum):
+    """기준선부터 프록시 철수까지의 마이그레이션 단계."""
+
     BASELINE = "S0"
     V1_ONLY = "S1"
     SHADOW = "S2"
@@ -35,6 +37,8 @@ def _references(values):
 
 @dataclass(frozen=True)
 class GateEvidence:
+    """단계 진행 조건별 현재 판정과 관측 근거."""
+
     gate: str
     status: str
     epoch: str
@@ -60,6 +64,8 @@ class GateEvidence:
 
 @dataclass(frozen=True)
 class PromotionDecision:
+    """단계 진행 허용 여부, 차단 사유 및 제외 조건."""
+
     allowed: bool
     blockers: tuple[str, ...]
     excluded: tuple[str, ...]
@@ -74,7 +80,24 @@ def evaluate_promotion(
     prior_comparison_evidence=(),
     current_serving_evidence=(),
 ):
-    """Validate supplied manual decisions; do not infer thresholds or apply changes."""
+    """제공된 수동 판정의 근거와 단계 진행 조건 검증.
+
+    임계값 추론이나 실제 전환은 수행하지 않음.
+
+    Args:
+        stage: 진행 대상 Stage 또는 단계 문자열.
+        epoch: 판정 대상 관측 에포크(str).
+        evidence: GateEvidence 반복 가능 객체.
+        comparison_active: 현재 비교 실행 여부(bool).
+        prior_comparison_evidence: 과거 비교 근거 문자열 목록.
+        current_serving_evidence: 현재 응답 제공 근거 문자열 목록.
+
+    Returns:
+        설정 변경 없이 반환하는 PromotionDecision.
+
+    Raises:
+        ValueError: 단계·에포크·근거 형식 오류 또는 중복 조건 평가.
+    """
     stage = Stage(stage)
     evidence = tuple(evidence)
     prior_comparison_evidence = _references(prior_comparison_evidence)
@@ -114,11 +137,15 @@ def evaluate_promotion(
 
 
 class RevisionConflict(ValueError):
+    """변경 요청의 기준 리비전이 최신 상태와 불일치."""
+
     pass
 
 
 @dataclass(frozen=True)
 class PropagationStatus:
+    """목표 리비전에 대한 워커별 적용·누락·실패 상태."""
+
     desired_revision: str
     workers: Mapping[str, str]
     missing: tuple[str, ...]
@@ -128,7 +155,7 @@ class PropagationStatus:
 
 
 class RevisionTracker:
-    """Each identity denotes a configuration-reading worker, not a load balancer."""
+    """로드 밸런서가 아닌 설정을 직접 읽는 워커 단위의 리비전 추적."""
 
     def __init__(self, *, workers, revision):
         workers = tuple(workers)
@@ -146,6 +173,7 @@ class RevisionTracker:
         self._lock = threading.RLock()
 
     def request_change(self, *, previous_revision, next_revision):
+        """기준 리비전 확인 후 목표 리비전 교체 및 실패 기록 초기화."""
         with self._lock:
             if previous_revision != self._desired:
                 raise RevisionConflict("previous revision is stale")
@@ -155,6 +183,7 @@ class RevisionTracker:
             self._failures.clear()
 
     def report(self, worker, revision, *, failed=False):
+        """등록 워커의 적용 리비전과 실패 여부 갱신."""
         with self._lock:
             if worker not in self._expected or not revision:
                 raise ValueError("unknown worker or empty revision")
@@ -165,6 +194,7 @@ class RevisionTracker:
                 self._failures.discard(worker)
 
     def status(self):
+        """모든 워커의 보고 여부·리비전 일치·실패를 종합한 전파 상태 반환."""
         with self._lock:
             missing = tuple(sorted(self._expected - self._reports.keys()))
             mismatched = tuple(
@@ -188,6 +218,8 @@ ROLLBACK_CHECKS = frozenset(
 
 @dataclass(frozen=True)
 class RollbackReadiness:
+    """현재 복구 점검 결과, 근거 및 실측·목표 복구 시간."""
+
     checks: Mapping[str, str]
     evidence: tuple[str, ...]
     measured_recovery_seconds: float | None
@@ -220,6 +252,8 @@ class RollbackReadiness:
 
 @dataclass(frozen=True)
 class ControlRatios:
+    """서로 독립적인 v2 응답 비율과 shadow 표본 비율."""
+
     v2_serve_ratio: float
     shadow_sample_ratio: float
 
@@ -231,9 +265,11 @@ class ControlRatios:
             raise ValueError("ratios must be finite values in [0, 1]")
 
     def stop_shadow(self):
+        """v2 응답 비율을 유지하면서 shadow 비율을 0으로 변경한 복사본 반환."""
         return ControlRatios(self.v2_serve_ratio, 0)
 
     def rollback_serving(self, readiness):
+        """복구 준비 통과 시 shadow 비율을 유지한 v1 전환 복사본 반환."""
         if readiness.status != "pass":
             raise ValueError("v1 rollback readiness has not been demonstrated")
         return ControlRatios(0, self.shadow_sample_ratio)
@@ -261,6 +297,8 @@ RETIREMENT_CHECKS = frozenset(
 
 @dataclass(frozen=True)
 class RetirementEvidence:
+    """잔여 호출자·직접 경로·보존 책임을 포함한 철수 근거."""
+
     checks: Mapping[str, str]
     references: tuple[str, ...]
 
@@ -285,6 +323,8 @@ class RetirementEvidence:
 
 @dataclass(frozen=True)
 class ChangeRecord:
+    """전환 주체, 리비전, 조건별 근거 및 적용·복구 결과 기록."""
+
     change_id: str
     route_or_group: str
     owner: str

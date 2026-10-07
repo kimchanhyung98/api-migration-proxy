@@ -1,3 +1,5 @@
+"""용량 제한 큐와 재시도를 통한 비교 이벤트 저장."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,17 +18,23 @@ from .events import CollectionEvent, _finite
 
 @dataclass(frozen=True)
 class BatchResult:
+    """이벤트 ID별 저장 확인·실패·확인 불가 결과."""
+
     acknowledged: frozenset[str] = frozenset()
     failed: frozenset[str] = frozenset()
     unknown: frozenset[str] = frozenset()
 
 
 class EventStore(Protocol):
+    """이벤트 묶음 저장과 ID별 결과 반환 계약."""
+
     async def write_batch(self, events: Sequence[CollectionEvent]) -> BatchResult: ...
 
 
 @dataclass(frozen=True)
 class CollectionLimits:
+    """수집 큐 용량, 대기 시간 및 저장 재시도 한도."""
+
     max_events: int
     max_bytes: int
     max_age_seconds: float
@@ -51,6 +59,8 @@ class CollectionLimits:
 
 
 class BoundedCollector:
+    """접수 이벤트의 저장 결과와 메모리 점유를 추적하는 수집기."""
+
     def __init__(
         self,
         store: EventStore,
@@ -72,6 +82,14 @@ class BoundedCollector:
         self.completeness_known = True
 
     def submit(self, event: CollectionEvent) -> bool:
+        """수집 한도 내에서 이벤트 복사본을 큐에 접수.
+
+        Args:
+            event: 허용 필드 검증과 마스킹을 마친 저장 이벤트.
+
+        Returns:
+            접수 성공 여부. True는 저장 완료를 의미하지 않음.
+        """
         if event._delivery.submitted or event.event_id in self._pending:
             return False
         if self._closed:
@@ -107,7 +125,13 @@ class BoundedCollector:
         return True
 
     def metrics(self) -> dict[str, float | int | bool]:
-        """Completeness excludes unresolved storage ACKs and shutdown gaps, not known drops."""
+        """수집 결과와 처리 중 이벤트의 점유 현황 반환.
+
+        저장 ACK 불명 또는 종료 중 누락은 완전성 미확인 처리. 확정된 폐기는 집계에 포함.
+
+        Returns:
+            건수·바이트·최장 대기 시간 및 저장 결과 집계의 완전성.
+        """
         now = time.monotonic()
         return {
             **self.counters,
@@ -146,7 +170,7 @@ class BoundedCollector:
         if not task.cancelled():
             failure = task.exception()
             if failure is not None:
-                # Executor exceptions can retain completed payloads through traceback cycles.
+                # 완료된 페이로드가 예외 traceback 순환 참조에 남지 않도록 해제.
                 clear_frames(failure.__traceback__)
                 failure.__traceback__ = None
         for event_id in event_ids:
@@ -164,7 +188,7 @@ class BoundedCollector:
                 ]
                 await self._write(batch)
         except asyncio.CancelledError:
-            pass  # The private worker must not retain cancelled wait frames and write tasks.
+            pass  # 작업자가 취소된 대기 프레임과 저장 작업을 계속 참조하지 않도록 해제.
         finally:
             for event, _ in list(self._pending.values()):
                 self._finish(event, "dropped_shutdown")
@@ -254,12 +278,24 @@ class BoundedCollector:
             raise
 
     async def flush(self) -> None:
+        """진행 중인 수집 작업과 저장 요청이 정리될 때까지 대기."""
         if self._worker is not None:
             await asyncio.shield(self._worker)
         if self._writes:
             await asyncio.wait(set(self._writes.values()))
 
     async def close(self, timeout: float) -> bool:
+        """접수를 중지하고 제한 시간 내 수집 작업 종료.
+
+        Args:
+            timeout: 종료 대기 시간(초).
+
+        Returns:
+            제한 시간 내 수집 작업 종료 여부. 모든 이벤트의 저장 성공을 의미하지 않음.
+
+        Raises:
+            ValueError: 종료 대기 시간이 양의 유한 수가 아닌 경우.
+        """
         if not _finite(timeout) or timeout <= 0:
             raise ValueError("invalid_close_timeout")
         self._closed = True

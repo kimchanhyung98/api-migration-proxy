@@ -1,4 +1,4 @@
-"""Bounded process metrics and worker snapshot aggregation."""
+"""라벨 범위를 제한한 프로세스 지표와 워커 스냅샷 집계."""
 
 from __future__ import annotations
 
@@ -80,6 +80,8 @@ MetricKey = tuple[str, tuple[tuple[str, str], ...]]
 
 @dataclass(frozen=True)
 class Histogram:
+    """누적 구간별 건수, 전체 건수 및 소요 시간 합계."""
+
     bounds: tuple[float, ...]
     buckets: tuple[int, ...]
     count: int
@@ -88,12 +90,16 @@ class Histogram:
 
 @dataclass(frozen=True)
 class MetricSnapshot:
+    """카운터·게이지·히스토그램의 한 시점 복사본."""
+
     counters: Mapping[MetricKey, int]
     gauges: Mapping[MetricKey, float]
     histograms: Mapping[MetricKey, Histogram]
 
 
 class Metrics:
+    """사전 등록한 지표와 라벨만 허용하는 스레드 안전 집계기."""
+
     def __init__(
         self,
         route_ids,
@@ -169,6 +175,7 @@ class Metrics:
         return name, tuple(sorted(labels.items()))
 
     def increment(self, name, value=1, **labels):
+        """등록 카운터를 비음수 정수만큼 증가."""
         key = self._key(name, labels, "counter")
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("counter increments must be nonnegative integers")
@@ -176,6 +183,7 @@ class Metrics:
             self._counters[key] += value
 
     def observe(self, name, seconds, **labels):
+        """유한한 비음수 소요 시간(초)을 히스토그램에 반영."""
         key = self._key(name, labels, "histogram")
         if not math.isfinite(seconds) or seconds < 0:
             raise ValueError("durations must be finite nonnegative seconds")
@@ -193,6 +201,7 @@ class Metrics:
             )
 
     def set_gauge(self, name, value, **labels):
+        """게이지를 유한한 비음수 값으로 설정."""
         key = self._key(name, labels, "gauge")
         if not math.isfinite(value) or value < 0:
             raise ValueError("gauge must be finite and nonnegative")
@@ -200,6 +209,7 @@ class Metrics:
             self._gauges[key] = value
 
     def adjust_gauge(self, name, delta, **labels):
+        """변경 후 값이 음수가 되지 않는 범위에서 게이지 증감."""
         key = self._key(name, labels, "gauge")
         with self._lock:
             value = self._gauges.get(key, 0) + delta
@@ -208,6 +218,7 @@ class Metrics:
             self._gauges[key] = value
 
     def value(self, name, **labels):
+        """등록 지표 조회. 미집계 값은 카운터 0, 게이지·히스토그램 None 반환."""
         key = self._key(name, labels)
         with self._lock:
             kind = _SCHEMAS[name][0]
@@ -216,6 +227,7 @@ class Metrics:
             return self._counters.get(key, 0) if kind == "counter" else self._gauges.get(key)
 
     def snapshot(self):
+        """현재 지표를 변경 불가능한 매핑으로 복사."""
         with self._lock:
             return MetricSnapshot(
                 MappingProxyType(dict(self._counters)),
@@ -224,6 +236,7 @@ class Metrics:
             )
 
     def export(self):
+        """지표 스냅샷을 JSON 직렬화 가능한 목록으로 변환."""
         snapshot = self.snapshot()
         result: list[dict[str, Any]] = []
         for kind, values in (("counter", snapshot.counters), ("gauge", snapshot.gauges)):
@@ -248,6 +261,8 @@ class Metrics:
 
 @dataclass(frozen=True)
 class WorkerMetrics:
+    """워커 식별자·프로세스 세대·생존 여부를 포함한 지표 스냅샷."""
+
     worker_id: str
     generation: str
     snapshot: MetricSnapshot
@@ -256,6 +271,19 @@ class WorkerMetrics:
 
 
 def merge_workers(workers, *, expected_workers, previous_generations=None):
+    """워커 지표를 합산하고 관측 완전성 평가.
+
+    Args:
+        workers: WorkerMetrics 반복 가능 객체.
+        expected_workers: 집계 대상 워커 ID 집합.
+        previous_generations: 이전 워커 ID별 세대 매핑. None이면 세대 비교 생략.
+
+    Returns:
+        MetricSnapshot과 완전성 여부의 튜플. 누락·중단·세대 변경은 미완전 처리.
+
+    Raises:
+        ValueError: 중복 워커, 식별 정보 누락 또는 히스토그램 구간 불일치.
+    """
     workers = tuple(workers)
     ids = [worker.worker_id for worker in workers]
     if len(ids) != len(set(ids)):

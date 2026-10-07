@@ -1,3 +1,5 @@
+"""불변 라우팅 설정 검증과 리비전 단위 교체."""
+
 from __future__ import annotations
 
 import json
@@ -16,10 +18,14 @@ from urllib.parse import urlsplit
 
 
 class ConfigurationError(ValueError):
+    """설정 형식 또는 정책 제약 위반."""
+
     pass
 
 
 class RevisionConflict(ConfigurationError):
+    """기대 리비전 불일치 또는 리비전 재사용."""
+
     pass
 
 
@@ -53,6 +59,17 @@ def _positive(value: object, name: str, *, integer: bool = False) -> None:
 
 
 def backend_origin(value: str) -> str:
+    """고정 HTTP 원본 주소 검증.
+
+    Args:
+        value: 스킴·호스트·선택적 포트로 구성한 주소.
+
+    Returns:
+        끝의 슬래시를 제거한 원본 주소.
+
+    Raises:
+        ConfigurationError: 인증 정보·경로·쿼리 포함 등 원본 주소 제약 위반.
+    """
     _text(value, "backend")
     if any(ord(char) < 33 or ord(char) > 126 for char in value) or any(
         char in value for char in '\\<>"{}|^`'
@@ -90,6 +107,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
 
 
 def template_parts(template: str) -> tuple[str, ...]:
+    """경로 템플릿 검증 후 세그먼트 반환. 위반 시 ConfigurationError 발생."""
     _text(template, "path_template")
     if (
         not template.startswith("/")
@@ -115,6 +133,8 @@ def template_parts(template: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class RuntimeBudgets:
+    """요청·shadow 실행의 시간, 동시성 및 본문 캡처 한도."""
+
     serving_timeout_seconds: float
     shadow_timeout_seconds: float
     client_send_timeout_seconds: float
@@ -131,6 +151,8 @@ class RuntimeBudgets:
 
 @dataclass(frozen=True)
 class Cohort:
+    """동일 집단의 일관된 백엔드 배정을 위한 키·해시 정책."""
+
     mode: str
     group: str
     key_source: str
@@ -158,6 +180,8 @@ class Cohort:
 
 @dataclass(frozen=True)
 class ShadowPolicy:
+    """shadow 실행 자격, 표본 비율, 검토 근거 및 중지 상태."""
+
     eligible: bool
     sample_ratio: float
     review_ref: str | None = None
@@ -175,6 +199,8 @@ class ShadowPolicy:
 
 @dataclass(frozen=True)
 class ResponseContract:
+    """HTTP 상태 코드별 성공·예상 거절·예상 밖 오류 계약."""
+
     success_statuses: frozenset[int]
     expected_rejection_statuses: frozenset[int] = frozenset()
     unexpected_error_statuses: frozenset[int] = frozenset()
@@ -201,6 +227,7 @@ class ResponseContract:
             object.__setattr__(self, name, statuses)
 
     def classify(self, status_code: int | None, *, body_complete: bool = True) -> str:
+        """서버 오류를 우선 분류하고 불완전하거나 미등록인 응답은 unknown 처리."""
         if status_code is not None and (
             status_code >= 500 or status_code in self.unexpected_error_statuses
         ):
@@ -216,6 +243,8 @@ class ResponseContract:
 
 @dataclass(frozen=True)
 class Route:
+    """HTTP 메서드·경로와 백엔드, 배정 및 shadow 정책의 연결."""
+
     route_id: str
     method: str
     path_template: str
@@ -271,6 +300,8 @@ class Route:
 
 @dataclass(frozen=True)
 class Snapshot:
+    """요청 처리 중 일관되게 참조할 검증된 라우팅 설정."""
+
     schema_version: int
     revision: str
     previous_revision: str | None
@@ -324,6 +355,17 @@ class Snapshot:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> Snapshot:
+        """중첩 설정 사전을 검증된 스냅샷으로 변환.
+
+        Args:
+            value: 라우트와 실행 한도를 포함한 설정 사전.
+
+        Returns:
+            검증을 마친 불변 스냅샷.
+
+        Raises:
+            ConfigurationError: 필드 누락·중복 라우트 등 설정 제약 위반.
+        """
         try:
             data: dict[str, Any] = dict(value)
             data["budgets"] = RuntimeBudgets(**data["budgets"])
@@ -342,6 +384,8 @@ class Snapshot:
 
 @dataclass(frozen=True)
 class ChangeRecord:
+    """설정 변경 주체, 사유 및 적용 시각 기록."""
+
     revision: str
     previous_revision: str | None
     actor: str
@@ -351,6 +395,8 @@ class ChangeRecord:
 
 
 class ConfigManager:
+    """잠금으로 스냅샷 교체와 변경 이력을 함께 관리."""
+
     def __init__(
         self,
         snapshot: Snapshot | None = None,
@@ -392,6 +438,20 @@ class ConfigManager:
     def apply(
         self, snapshot: Snapshot, *, actor: str, expected_revision: str | None
     ) -> ChangeRecord:
+        """기대 리비전 확인 후 스냅샷을 원자적으로 교체.
+
+        Args:
+            snapshot: 적용할 검증된 스냅샷.
+            actor: 변경 주체 식별자.
+            expected_revision: 호출자가 확인한 현재 리비전. 최초 적용은 None.
+
+        Returns:
+            적용한 변경의 이력.
+
+        Raises:
+            RevisionConflict: 현재 리비전 불일치 또는 리비전 재사용.
+            ConfigurationError: 유효하지 않은 설정·변경 주체 또는 이력 한도 초과.
+        """
         if not isinstance(snapshot, Snapshot):
             raise ConfigurationError("only validated snapshots may be applied")
         _text(actor, "change actor")
@@ -422,6 +482,7 @@ class ConfigManager:
             return record
 
     def add_validator(self, validator: Callable[[Snapshot], None]) -> None:
+        """현재 스냅샷을 먼저 검사한 뒤 이후 교체에도 적용할 검증기 등록."""
         with self._lock:
             if self._snapshot is not None:
                 validator(self._snapshot)
@@ -429,10 +490,22 @@ class ConfigManager:
 
 
 def snapshot_from_dict(value: Mapping[str, object]) -> Snapshot:
+    """설정 사전을 검증된 Snapshot으로 변환."""
     return Snapshot.from_dict(value)
 
 
 def read_config(path: str | Path) -> Snapshot:
+    """JSON 파일에서 라우팅 스냅샷 로딩.
+
+    Args:
+        path: 라우팅 설정 파일 경로.
+
+    Returns:
+        중복 키·유한 수·라우트 제약을 검증한 스냅샷.
+
+    Raises:
+        ConfigurationError: 파일 읽기, JSON 구문 또는 설정 검증 실패.
+    """
     try:
         value = json.loads(
             Path(path).read_text(encoding="utf-8"),

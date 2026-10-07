@@ -1,3 +1,5 @@
+"""응답 전환·복구 또는 shadow 실행·중지 시나리오 진입점."""
+
 import argparse
 
 from scenarios.distribution import validate_parameters
@@ -5,6 +7,7 @@ from scenarios.runner import Stage, handle_termination, run_stages
 
 
 def main() -> int:
+    """CLI에서 선택한 순차 전환 시나리오 실행 후 종료 코드 반환."""
     parser = argparse.ArgumentParser(description="Run sequential Docker migration scenarios")
     commands = parser.add_subparsers(dest="scenario", required=True)
     serving = commands.add_parser("serving", help="v1 to split to v2 to v1, with shadow stopped")

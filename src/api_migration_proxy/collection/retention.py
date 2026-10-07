@@ -1,3 +1,5 @@
+"""만료 이벤트를 제한된 묶음으로 주기적으로 삭제."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,10 +9,14 @@ from .events import _finite
 
 
 class RetentionStore(Protocol):
+    """만료 요약·상세의 일괄 삭제 계약."""
+
     async def purge_expired(self, *, batch_size: int) -> dict[str, int]: ...
 
 
 class RetentionWorker:
+    """삭제 실패 뒤에도 다음 주기에 작업을 계속하는 보존 작업자."""
+
     def __init__(
         self,
         store: RetentionStore,
@@ -29,6 +35,7 @@ class RetentionWorker:
         self._worker: asyncio.Task[None] | None = None
 
     def start(self) -> None:
+        """중복 실행을 막고 주기적 삭제 작업 시작."""
         if self._stop.is_set():
             raise RuntimeError("retention worker is closed")
         if self._worker is None:
@@ -49,6 +56,7 @@ class RetentionWorker:
                 pass
 
     async def close(self, timeout: float) -> None:
+        """중지 신호 전달 후 제한 시간 내 작업 종료."""
         if not _finite(timeout) or timeout < 0:
             raise ValueError("invalid_retention_close_timeout")
         self._stop.set()

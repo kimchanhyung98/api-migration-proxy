@@ -1,3 +1,5 @@
+"""요청 전달 앱과 내부 상태 확인 앱 구성."""
+
 from __future__ import annotations
 
 import inspect
@@ -16,6 +18,8 @@ if TYPE_CHECKING:
 
 
 def create_app(runtime: ProxyRuntime) -> FastAPI:
+    """프록시 런타임의 시작·종료를 관리하는 요청 전달 앱 생성."""
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
@@ -36,6 +40,15 @@ def create_app(runtime: ProxyRuntime) -> FastAPI:
 
 
 def control_authorizer(token: str) -> Callable[[Request], bool]:
+    """루프백 주소와 선택적 Bearer 토큰 검증 함수 생성.
+
+    Args:
+        token: 빈 문자열이면 루프백 주소만 검증.
+
+    Returns:
+        요청 접근 허용 여부를 반환하는 함수.
+    """
+
     def authorize(request: Request) -> bool:
         if request.client is None:
             return False
@@ -63,6 +76,16 @@ def create_listener_app(
     control_port: int,
     authorize: Callable[[Request], bool | Awaitable[bool]],
 ) -> ASGIApp:
+    """수신 포트에 따라 요청 전달 앱과 제어 앱 분기.
+
+    Args:
+        runtime: 두 앱에서 공유할 프록시 런타임.
+        control_port: 제어 요청을 수신할 포트.
+        authorize: 제어 요청의 동기 또는 비동기 접근 검사 함수.
+
+    Returns:
+        lifespan을 요청 전달 앱에서 관리하는 ASGI 앱.
+    """
     data_app = create_app(runtime)
     control_app = create_control_app(runtime, authorize=authorize)
 
@@ -81,6 +104,7 @@ def create_control_app(
     *,
     authorize: Callable[[Request], bool | Awaitable[bool]],
 ) -> FastAPI:
+    """루프백 접근과 추가 인증을 요구하는 상태 확인 앱 생성."""
     local_access = control_authorizer("")
 
     async def require_access(request: Request) -> None:

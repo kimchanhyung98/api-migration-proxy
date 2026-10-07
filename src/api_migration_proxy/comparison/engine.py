@@ -1,3 +1,5 @@
+"""명시적 비교 전제와 자원 한도에 따른 HTTP·JSON 응답 비교."""
+
 from __future__ import annotations
 
 import json
@@ -51,6 +53,8 @@ REASON_CODES = frozenset(
 
 @dataclass(frozen=True)
 class BackendResponse:
+    """백엔드 역할, 실행 결과 및 비교용 응답 캡처."""
+
     backend: str
     role: str
     execution_outcome: str
@@ -80,6 +84,8 @@ class BackendResponse:
 
 @dataclass(frozen=True)
 class ComparisonContext:
+    """논리 요청·권한·데이터의 비교 가능 여부. None은 확인되지 않은 상태."""
+
     logical_request_equal: bool | None = None
     authorization_equal: bool | None = None
     data_comparable: bool | None = None
@@ -87,18 +93,24 @@ class ComparisonContext:
 
 @dataclass(frozen=True)
 class FieldMapping:
+    """v2 JSON 필드를 v1 비교 경로로 대응시키는 규칙."""
+
     v1_path: str
     v2_path: str
 
 
 @dataclass(frozen=True)
 class Tolerance:
+    """지정 JSON 경로의 절대 수치 오차 허용값."""
+
     path: str
     absolute: Decimal
 
 
 @dataclass(frozen=True)
 class ComparisonPolicy:
+    """본문 처리 한도와 정규화·허용 차이 규칙."""
+
     revision: str
     max_body_bytes: int
     max_decoded_body_bytes: int
@@ -200,6 +212,8 @@ class ComparisonPolicy:
 
 @dataclass(frozen=True)
 class ComparisonResult:
+    """비교 판정, 차이 집계 및 적용 규칙 기록."""
+
     result: str
     reason: str
     comparison_class: str
@@ -249,6 +263,7 @@ def _header_values(response: BackendResponse, name: str) -> tuple[str, ...]:
 
 
 def _decode(response: BackendResponse, policy: ComparisonPolicy) -> bytes:
+    """압축 해제 전후의 크기 한도를 적용하여 응답 본문 추출."""
     body = response.body
     if body is None:
         raise _NotComparable("capture_unavailable")
@@ -284,6 +299,7 @@ def _decode(response: BackendResponse, policy: ComparisonPolicy) -> bytes:
 
 
 def _parse(body: bytes, policy: ComparisonPolicy) -> Any:
+    """깊이·노드·숫자 한도와 중복 키를 검사하며 JSON 파싱."""
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
@@ -458,6 +474,7 @@ def _mapping_parent(value: Any, parts: tuple[str, ...]) -> dict[str, Any] | None
 
 
 def _map_fields(value: Any, policy: ComparisonPolicy, applied: set[str]) -> None:
+    """v2 필드를 v1 경로로 이동하고 적용 규칙 기록."""
     for index, mapping in enumerate(policy.mappings):
         source = _parts(mapping.v2_path)
         target = _parts(mapping.v1_path)
@@ -497,6 +514,21 @@ def _compare_metadata(
 def compare(
     v1: BackendResponse, v2: BackendResponse, policy: ComparisonPolicy, context: ComparisonContext
 ) -> ComparisonResult:
+    """비교 전제 확인 후 원본·정규화 결과 계산.
+
+    Args:
+        v1: v1의 실행 결과와 응답 캡처.
+        v2: v2의 실행 결과와 응답 캡처.
+        policy: 비교 규칙과 처리 한도.
+        context: 논리 요청·권한·데이터의 비교 가능 근거.
+
+    Returns:
+        일치·차이·미실행·실행 오류·비교 불가 상태와 제한된 차이 경로.
+
+    Raises:
+        ValueError: v1·v2 식별자 또는 serving·shadow 역할 조합 오류.
+    """
+
     def unavailable(result: str, reason: str) -> ComparisonResult:
         return ComparisonResult(result, reason, "unavailable", policy.revision)
 
@@ -549,6 +581,7 @@ def compare(
         else:
             parsed = tuple(_parse(body, policy) for body in bodies)
         raw = _Differences(policy)
+        # 정규화 전 차이를 먼저 집계하여 허용 규칙의 영향 구분.
         _compare_metadata(v1, v2, raw, None)
         _walk(parsed[0], parsed[1], raw, None)
         _map_fields(parsed[1], policy, applied)

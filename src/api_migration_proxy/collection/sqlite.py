@@ -1,3 +1,5 @@
+"""단일 전용 스레드로 관리하는 로컬 SQLite 이벤트 저장소."""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +19,7 @@ from .query import EventQuery, QueryAccess
 
 
 class SQLiteEventStore:
-    """Private local SQLite event storage for the Proxy CLI."""
+    """단일 전용 스레드로 관리하는 로컬 SQLite 이벤트 저장소."""
 
     def __init__(self, path: str, *, create: bool = True):
         self._path = path
@@ -99,6 +101,19 @@ class SQLiteEventStore:
         return future.result()
 
     async def write_batch(self, events: Sequence[CollectionEvent]) -> BatchResult:
+        """이벤트 ID 중복을 무시하며 묶음을 트랜잭션으로 저장.
+
+        Args:
+            events: 검증과 마스킹을 마친 이벤트 목록.
+
+        Returns:
+            커밋 후 확인된 모든 입력 이벤트 ID.
+
+        Raises:
+            RuntimeError: 이미 종료 중인 저장소 접근.
+            sqlite3.Error: SQLite 연결 또는 쿼리 실행 실패.
+        """
+
         def write() -> BatchResult:
             db = self._db()
             with db:
@@ -135,6 +150,22 @@ class SQLiteEventStore:
     async def query(
         self, query: EventQuery, access: QueryAccess, *, now: float | None = None
     ) -> list[dict[str, Any]]:
+        """접근 권한과 보존 기한을 적용하여 이벤트 조회.
+
+        Args:
+            query: 시간 구간·라우트·결과 필터.
+            access: 허용 라우트·기간·건수 및 상세 접근 권한.
+            now: 보존 기한 확인용 Unix 타임스탬프. None이면 현재 시각.
+
+        Returns:
+            만료 상세와 비허용 상세를 제외한 이벤트 목록.
+
+        Raises:
+            PermissionError: 허용 범위를 벗어난 라우트 조회.
+            ValueError: 기간·건수·필터·조회 시각 제약 위반.
+            RuntimeError: 이미 종료 중인 저장소 접근.
+            sqlite3.Error: SQLite 연결 또는 쿼리 실행 실패.
+        """
         if not query.routes or not query.routes <= access.routes:
             raise PermissionError("query_route_denied")
         if (
@@ -220,6 +251,20 @@ class SQLiteEventStore:
         return await self._run(read)
 
     async def purge_expired(self, *, now: float | None = None, batch_size: int) -> dict[str, int]:
+        """만료 상세와 요약을 각각 제한된 건수만큼 삭제.
+
+        Args:
+            now: 만료 판정용 Unix 타임스탬프. None이면 현재 시각.
+            batch_size: 상세와 요약 각각의 최대 삭제 건수.
+
+        Returns:
+            상세·요약 삭제 건수와 남은 만료 이벤트 수.
+
+        Raises:
+            ValueError: 삭제 시각 또는 묶음 크기 오류.
+            RuntimeError: 이미 종료 중인 저장소 접근.
+            sqlite3.Error: SQLite 연결 또는 쿼리 실행 실패.
+        """
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("invalid_delete_batch")
         current = time.time() if now is None else now
@@ -255,14 +300,15 @@ class SQLiteEventStore:
         return await self._run(purge)
 
     async def close(self) -> None:
+        """진행 중 작업 뒤에 연결 종료를 예약하고 완료 대기."""
+
         def close_db() -> None:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
 
         if self._closing is None:
-            # The single executor closes the connection after any in-flight write,
-            # even when its caller has stopped waiting for an acknowledgement.
+            # 호출자가 ACK 대기를 중단해도 진행 중 쓰기 이후 전용 스레드에서 연결 종료.
             self._closing = asyncio.get_running_loop().run_in_executor(self._executor, close_db)
             self._closing.add_done_callback(
                 lambda future: future.exception() if not future.cancelled() else None

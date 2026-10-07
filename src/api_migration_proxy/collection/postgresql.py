@@ -1,3 +1,5 @@
+"""비동기 연결과 작업 직렬화를 사용하는 PostgreSQL 이벤트 저장소."""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +20,8 @@ _OPERATION_TIMEOUT_SECONDS = 10
 
 
 class PostgreSQLEventStore:
+    """비동기 연결과 작업 직렬화를 사용하는 PostgreSQL 이벤트 저장소."""
+
     def __init__(self, dsn: str, *, create: bool = True):
         self._dsn = dsn
         self._create = create
@@ -36,7 +40,7 @@ class PostgreSQLEventStore:
             await self._connection.execute("SET idle_in_transaction_session_timeout = '10s'")
             if self._create:
                 async with self._connection.transaction():
-                    # Serialize first-time DDL across proxy processes.
+                    # 여러 프록시 프로세스의 최초 스키마 생성을 직렬화.
                     await self._connection.execute("SELECT pg_advisory_xact_lock(684204682412)")
                     await self._connection.execute("""CREATE TABLE IF NOT EXISTS comparison_event (
                         event_id TEXT PRIMARY KEY, created_at DOUBLE PRECISION NOT NULL,
@@ -64,7 +68,7 @@ class PostgreSQLEventStore:
             self._connection = None
 
     async def _stop(self, task: asyncio.Task) -> None:
-        # Close first so cancellation never waits on another network round trip.
+        # 취소가 추가 네트워크 응답을 기다리지 않도록 연결부터 종료.
         await self._disconnect()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -95,10 +99,22 @@ class PostgreSQLEventStore:
                 await self._stop(task)
             else:
                 return result
-            # Raising outside the handler drops driver diagnostics and traceback chains.
+            # 드라이버 진단 정보와 traceback 체인 노출을 막기 위해 처리 블록 밖에서 발생.
             raise RuntimeError("event store operation failed")
 
     async def write_batch(self, events: Sequence[CollectionEvent]) -> BatchResult:
+        """이벤트 ID 중복을 무시하며 묶음을 트랜잭션으로 저장.
+
+        Args:
+            events: 검증과 마스킹을 마친 이벤트 목록.
+
+        Returns:
+            커밋 후 확인된 모든 입력 이벤트 ID.
+
+        Raises:
+            RuntimeError: 저장소 종료 상태 또는 저장 작업 실패.
+        """
+
         async def write() -> BatchResult:
             db = await self._db()
             async with db.transaction():
@@ -133,6 +149,21 @@ class PostgreSQLEventStore:
     async def query(
         self, query: EventQuery, access: QueryAccess, *, now: float | None = None
     ) -> list[dict[str, Any]]:
+        """접근 권한과 보존 기한을 적용하여 이벤트 조회.
+
+        Args:
+            query: 시간 구간·라우트·결과 필터.
+            access: 허용 라우트·기간·건수 및 상세 접근 권한.
+            now: 보존 기한 확인용 Unix 타임스탬프. None이면 현재 시각.
+
+        Returns:
+            만료 상세와 비허용 상세를 제외한 이벤트 목록.
+
+        Raises:
+            PermissionError: 허용 범위를 벗어난 라우트 조회.
+            ValueError: 기간·건수·필터·조회 시각 제약 위반.
+            RuntimeError: 저장소 종료 상태 또는 조회 실패.
+        """
         if not query.routes or not query.routes <= access.routes:
             raise PermissionError("query_route_denied")
         if (
@@ -219,6 +250,19 @@ class PostgreSQLEventStore:
         return await self._run(read)
 
     async def purge_expired(self, *, now: float | None = None, batch_size: int) -> dict[str, int]:
+        """만료 상세와 요약을 각각 제한된 건수만큼 삭제.
+
+        Args:
+            now: 만료 판정용 Unix 타임스탬프. None이면 현재 시각.
+            batch_size: 상세와 요약 각각의 최대 삭제 건수.
+
+        Returns:
+            상세·요약 삭제 건수와 남은 만료 이벤트 수.
+
+        Raises:
+            ValueError: 삭제 시각 또는 묶음 크기 오류.
+            RuntimeError: 저장소 종료 상태 또는 삭제 실패.
+        """
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("invalid_delete_batch")
         current = time.time() if now is None else now
@@ -267,6 +311,8 @@ class PostgreSQLEventStore:
         return outcome
 
     async def close(self) -> None:
+        """진행 중 작업 뒤에 연결 종료를 예약하고 완료 대기."""
+
         async def close_db() -> None:
             async with self._slot:
                 await self._disconnect()
