@@ -89,6 +89,12 @@ def test_data_plane_lifecycle_and_unmodified_public_paths():
         assert response.headers.get_list("set-cookie") == ["first=1", "second=2"]
         assert runtime.requests[-1]["raw_path"].split(b"?")[0] == b"/items/a%2Fb"
         assert runtime.requests[-1]["query_string"] == b"k=1&k=2"
+        response = client.get("/items/a%0Ab?k=1&k=2")
+        assert response.status_code == 201
+        assert response.content == b"backend"
+        assert runtime.requests[-1]["path"] == "/items/a\nb"
+        assert runtime.requests[-1]["raw_path"].split(b"?")[0] == b"/items/a%0Ab"
+        assert runtime.requests[-1]["query_string"] == b"k=1&k=2"
     assert runtime.closed == 1
     assert runtime.ready is False
 
@@ -941,7 +947,17 @@ def test_cli_process_forwards_real_loopback_http_and_shuts_down(
             assert len(response.headers.get_list("date")) == 1
             assert client.get("/docs").json() == {"source": "synthetic-v1"}
             assert client.get("/items/registered").json() == {"source": "synthetic-v1"}
-        assert requests == ["/items/a%2Fb?key=1&key=2", "/docs", "/items/registered"]
+            for path in ("/items/a%0Ab?key=1&key=2", "/unregistered/a%0Ab"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.content == b'{"source":"synthetic-v1"}'
+        assert requests == [
+            "/items/a%2Fb?key=1&key=2",
+            "/docs",
+            "/items/registered",
+            "/items/a%0Ab?key=1&key=2",
+            "/unregistered/a%0Ab",
+        ]
         process.send_signal(signal.SIGINT)
         process.communicate(timeout=10)
         assert process.returncode in (0, -signal.SIGINT)

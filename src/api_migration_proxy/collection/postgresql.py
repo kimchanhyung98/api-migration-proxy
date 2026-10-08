@@ -199,7 +199,7 @@ class PostgreSQLEventStore:
                 if value is not None:
                     clauses.append(f"{name} = %s")
                     parameters.append(value)
-            if query.backend or query.role or query.deployment_revision:
+            if query.backend or query.role or query.deployment_revision is not None:
                 backend_clauses = []
                 for backend in (query.backend,) if query.backend else ("v1", "v2"):
                     filters = []

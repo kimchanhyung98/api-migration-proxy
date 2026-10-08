@@ -883,6 +883,35 @@ async def test_t28_query_scope_time_rows_and_backend_filters(tmp_path):
         await store.close()
 
 
+@pytest.mark.parametrize("backend", [None, "v2"])
+@pytest.mark.parametrize(
+    ("revision", "matches"),
+    [(None, True), ("", False), ("missing-build", False), ("v2-build", True)],
+)
+async def test_query_deployment_revision_filter_distinguishes_empty_from_omitted(
+    tmp_path, backend, revision, matches
+):
+    store = SQLiteEventStore(str(tmp_path / "events.sqlite"))
+    item = event(now=100)
+    try:
+        await store.write_batch([item])
+        rows = await store.query(
+            EventQuery(
+                99,
+                102,
+                frozenset({"catalog"}),
+                1,
+                backend=backend,
+                deployment_revision=revision,
+            ),
+            QueryAccess(frozenset({"catalog"}), 1, 5),
+            now=101,
+        )
+        assert [row["event_id"] for row in rows] == ([item.event_id] if matches else [])
+    finally:
+        await store.close()
+
+
 @pytest.mark.parametrize("now", [True, False, float("nan"), float("inf"), -float("inf"), "100"])
 async def test_query_rejects_invalid_clock_without_creating_store(tmp_path, now):
     path = tmp_path / "missing.sqlite"

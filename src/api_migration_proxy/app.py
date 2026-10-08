@@ -35,7 +35,7 @@ def create_app(runtime: ProxyRuntime) -> FastAPI:
         redirect_slashes=False,
         lifespan=lifespan,
     )
-    app.mount("/", runtime)
+    app.router.default = runtime
     return app
 
 

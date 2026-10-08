@@ -237,6 +237,25 @@ async def test_query_scope_filters_and_detail_expiry(postgres_dsn):
         await store.close()
 
 
+@pytest.mark.parametrize("backend", [None, "v2"])
+@pytest.mark.parametrize(
+    ("revision", "matches"),
+    [(None, True), ("", False), ("missing-build", False), ("v2-build", True)],
+)
+async def test_query_deployment_revision_filter_distinguishes_empty_from_omitted(
+    postgres_dsn, backend, revision, matches
+):
+    store = PostgreSQLEventStore(postgres_dsn)
+    item = event()
+    try:
+        await store.write_batch([item])
+        filtered = replace(query(), backend=backend, deployment_revision=revision)
+        rows = await store.query(filtered, access(), now=101)
+        assert [row["event_id"] for row in rows] == ([item.event_id] if matches else [])
+    finally:
+        await store.close()
+
+
 @pytest.mark.parametrize("wait_at", ["slot", "database"])
 @pytest.mark.parametrize("expires", ["summary", "detail"])
 async def test_query_rechecks_default_clock_after_waiting(
