@@ -65,7 +65,7 @@
 - 단순 모드 revision: 정규화된 라우팅 설정의 `env-` fingerprint; 관측 `epoch_id`도 같은 값 사용
 - 동일 설정 재시작 또는 비율 `0 → 1 → 0` 복귀 시 최초와 복귀 구간 식별자 재사용
 - 식별자만으로 실행 구간·변경 이력 분리 불가; 동일 revision의 저장 이벤트 합산 시 구간 혼합 가능
-- [순차 시나리오](../validation/scenarios.md)는 단계별 JSON revision·epoch와 산출물로 구간 분리
+- [순차 시나리오](../validation/scenarios.md)는 단계별 JSON revision과 산출물로 구간 분리
 - 제품의 변경 이력·관측 구간 분리 요구사항을 대체하지 않음
 
 ## CLI 사용과 진단
